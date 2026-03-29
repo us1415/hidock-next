@@ -32,7 +32,7 @@ import time
 import tkinter
 import traceback
 
-# from datetime import datetime  # Currently unused - may be needed for future timestamp features
+from datetime import datetime
 from tkinter import messagebox, ttk  # Removed filedialog - not used
 
 import customtkinter as ctk
@@ -228,6 +228,7 @@ class HiDockToolGUI(
         self.toolbar_download_button = None
         self.toolbar_play_button = None
         self.toolbar_insights_button = None
+        self.toolbar_export_mp3_button = None
         self.toolbar_delete_button = None
         self.toolbar_settings_button = None
         self.status_bar_frame = None
@@ -779,6 +780,7 @@ class HiDockToolGUI(
         self.file_tree.tag_configure("recording", foreground="red", font=("Arial", 10, "bold"))
         self.file_tree.tag_configure("size_mismatch", foreground="orange")
         self.file_tree.tag_configure("downloaded_ok", foreground="green")
+        self.file_tree.tag_configure("analyzed", foreground="teal")
         self.file_tree.tag_configure("downloading", foreground="dark orange")
         self.file_tree.tag_configure("download", foreground="dark orange")  # For download operations
         self.file_tree.tag_configure("deleting", foreground="red")
@@ -913,18 +915,44 @@ class HiDockToolGUI(
                 logger.error("GUI", "get_decrypted_api_key", "cryptography package not installed")
                 return ""
 
-            # Try to load existing key from config directory
-            config_dir = os.path.dirname(self.config.get("config_file_path", ""))
-            key_file = os.path.join(config_dir, ".hidock_key.dat")
+            # Build a list of candidate directories to search for the key file.
+            # The key may have been created in any of these locations depending on
+            # how the app was launched (CWD varies).
+            _src_dir = os.path.dirname(os.path.abspath(__file__))  # .../apps/desktop/src
+            _app_root = os.path.dirname(_src_dir)                   # .../apps/desktop
+            candidate_dirs = []
+            config_file_path = self.config.get("config_file_path", "")
+            if config_file_path:
+                candidate_dirs.append(os.path.dirname(config_file_path))  # explicit config dir
+            candidate_dirs.append(os.path.join(_app_root, "config"))  # apps/desktop/config/
+            candidate_dirs.append(_app_root)                           # apps/desktop/
+            candidate_dirs.append(os.getcwd())                         # current working dir
+            # Deduplicate while preserving order
+            seen = set()
+            unique_dirs = []
+            for d in candidate_dirs:
+                d_abs = os.path.abspath(d)
+                if d_abs not in seen:
+                    seen.add(d_abs)
+                    unique_dirs.append(d_abs)
 
-            if os.path.exists(key_file):
-                with open(key_file, "rb") as f:
-                    key = f.read()
+            for candidate_dir in unique_dirs:
+                key_file = os.path.join(candidate_dir, ".hidock_key.dat")
+                if not os.path.exists(key_file):
+                    continue
+                try:
+                    with open(key_file, "rb") as kf:
+                        key = kf.read()
+                    fernet = Fernet(key)
+                    encrypted_bytes = base64.b64decode(encrypted_key.encode())
+                    decrypted = fernet.decrypt(encrypted_bytes)
+                    logger.debug("GUI", "get_decrypted_api_key", f"Decrypted key using {key_file}")
+                    return decrypted.decode()
+                except Exception:
+                    # This key file didn't work — try next candidate
+                    continue
 
-                f = Fernet(key)
-                encrypted_bytes = base64.b64decode(encrypted_key.encode())
-                decrypted = f.decrypt(encrypted_bytes)
-                return decrypted.decode()
+            logger.error("GUI", "get_decrypted_api_key", "No valid encryption key file found in any candidate directory")
 
         except Exception as e:
             logger.error("GUI", "get_decrypted_api_key", f"Error decrypting API key: {e}")
@@ -1409,6 +1437,14 @@ class HiDockToolGUI(
             image=self.icons.get("insights", self.icons.get("play")),  # Use insights icon or fallback to play
         )
         self.toolbar_insights_button.pack(side="left", padx=toolbar_button_padx, pady=toolbar_button_pady)
+        self.toolbar_export_mp3_button = ctk.CTkButton(
+            self.toolbar_frame,
+            text="Export MP3",
+            command=self.export_selected_as_mp3_gui,
+            width=toolbar_button_width,
+            image=self.icons.get("download"),
+        )
+        self.toolbar_export_mp3_button.pack(side="left", padx=toolbar_button_padx, pady=toolbar_button_pady)
         self.toolbar_delete_button = ctk.CTkButton(
             self.toolbar_frame,
             text="Delete",
@@ -1802,7 +1838,7 @@ class HiDockToolGUI(
             if self.is_long_operation_active and self.active_operation_name == "Download Queue":
                 self.toolbar_download_button.configure(
                     text="Cancel DL",
-                    command=self.request_cancel_operation,
+                    command=self.cancel_all_downloads_gui,
                     state="normal",
                     image=self.icons.get("stop"),
                 )
@@ -1838,7 +1874,7 @@ class HiDockToolGUI(
             elif self.is_long_operation_active and self.active_operation_name == "Playback Preparation":
                 self.toolbar_play_button.configure(
                     text="Cancel Prep",
-                    command=self.request_cancel_operation,
+                    command=self.cancel_all_operations_gui,
                     state="normal",
                     image=self.icons.get("stop"),
                 )
@@ -1853,7 +1889,7 @@ class HiDockToolGUI(
             if self.is_long_operation_active and self.active_operation_name == "Transcription":
                 self.toolbar_insights_button.configure(
                     text="Cancel Insights",
-                    command=self.request_cancel_operation,
+                    command=self._cancel_transcription,
                     state="normal",
                     image=self.icons.get("stop"),
                 )
@@ -1880,11 +1916,32 @@ class HiDockToolGUI(
                     state="normal" if can_get_insights else "disabled",
                     image=self.icons.get("insights", self.icons.get("play")),
                 )
+        if hasattr(self, "toolbar_export_mp3_button") and self.toolbar_export_mp3_button.winfo_exists():
+            # Enable when a single locally-downloaded file is selected and no long op is running
+            can_export_mp3 = (
+                has_selection
+                and num_selected == 1
+                and not self.is_long_operation_active
+                and not self.is_audio_playing
+            )
+            if can_export_mp3:
+                file_iid = self.file_tree.selection()[0]
+                # Use displayed_files_details local_path first (already computed), then fall back
+                # to offline_mode_manager which checks multiple path formats (.hda, .wav, cache)
+                file_detail = next((f for f in self.displayed_files_details if f["name"] == file_iid), None)
+                local_path = file_detail.get("local_path") if file_detail else None
+                if not local_path or not os.path.exists(local_path):
+                    if hasattr(self, "offline_mode_manager"):
+                        local_path = self.offline_mode_manager.get_offline_file_path(file_iid)
+                can_export_mp3 = bool(local_path and os.path.exists(local_path))
+            self.toolbar_export_mp3_button.configure(
+                state="normal" if can_export_mp3 else "disabled",
+            )
         if hasattr(self, "toolbar_delete_button") and self.toolbar_delete_button.winfo_exists():
             if self.is_long_operation_active and self.active_operation_name == "Deletion":
                 self.toolbar_delete_button.configure(
                     text="Cancel Del.",
-                    command=self.request_cancel_operation,
+                    command=self.cancel_active_deletions_gui,
                     state="normal",
                     image=self.icons.get("stop"),
                 )
@@ -2471,6 +2528,113 @@ class HiDockToolGUI(
         self.transcription_cancelled = False
         self.current_transcription_thread = None
 
+        # In-memory cache: filename → {"transcription": str, "insights": dict}
+        # Populated when "Get Insights" completes so re-selecting a file reloads results.
+        self._transcription_results_cache = {}
+
+    def _update_transcription_panel_for_selection(self):
+        """Update the transcription/insights panel to match the currently selected file.
+
+        If the selected file already has transcription data in the DB, display it.
+        Otherwise reset the panel to its idle 'waiting' state so stale data
+        from a previous file is never shown.
+        """
+        if not hasattr(self, "transcription_textbox") or not self.transcription_textbox.winfo_exists():
+            return
+
+        selection = self.file_tree.selection()
+        if not selection or len(selection) != 1:
+            # No single file selected — reset to idle
+            self._reset_transcription_panel()
+            return
+
+        filename = selection[0]
+
+        # 1. Check the in-memory cache first (populated when "Get Insights" completes)
+        cached = getattr(self, "_transcription_results_cache", {}).get(filename)
+        if cached:
+            transcription_text = cached.get("transcription", "")
+            insights = cached.get("insights", {})
+
+            self.transcription_status_label.configure(
+                text=f"✅ Cached transcription for '{filename}'"
+            )
+            self.transcription_textbox.configure(state="normal")
+            self.transcription_textbox.delete("1.0", "end")
+            self.transcription_textbox.insert("1.0", transcription_text)
+            self.transcription_textbox.configure(state="disabled")
+
+            insights_formatted = self._format_insights_for_display(insights)
+            self.insights_textbox.configure(state="normal")
+            self.insights_textbox.delete("1.0", "end")
+            self.insights_textbox.insert("1.0", insights_formatted)
+            self.insights_textbox.configure(state="disabled")
+
+            self.transcription_section.pack(fill="both", expand=True, padx=5, pady=5)
+            self.insights_section.pack(fill="both", expand=True, padx=5, pady=5)
+            self.transcription_content_loaded = True
+            return
+
+        # 2. Fall back to the audio-metadata DB (for data saved in previous sessions)
+        metadata = None
+        if hasattr(self, "get_audio_metadata_for_file"):
+            try:
+                metadata = self.get_audio_metadata_for_file(filename)
+            except Exception:
+                pass
+
+        if metadata and metadata.transcription_text:
+            self.transcription_status_label.configure(
+                text=f"✅ Loaded from database for '{filename}'"
+            )
+            self.transcription_textbox.configure(state="normal")
+            self.transcription_textbox.delete("1.0", "end")
+            self.transcription_textbox.insert("1.0", metadata.transcription_text)
+            self.transcription_textbox.configure(state="disabled")
+
+            insights = {
+                "summary": metadata.ai_summary or "",
+                "participants": metadata.ai_participants or [],
+                "action_items": metadata.ai_action_items or [],
+                "topics": metadata.ai_topics or [],
+                "overall_sentiment_meeting": metadata.ai_sentiment or "",
+                "key_quotes": metadata.ai_key_quotes or [],
+            }
+            insights_formatted = self._format_insights_for_display(insights)
+            self.insights_textbox.configure(state="normal")
+            self.insights_textbox.delete("1.0", "end")
+            self.insights_textbox.insert("1.0", insights_formatted)
+            self.insights_textbox.configure(state="disabled")
+
+            self.transcription_section.pack(fill="both", expand=True, padx=5, pady=5)
+            self.insights_section.pack(fill="both", expand=True, padx=5, pady=5)
+            self.transcription_content_loaded = True
+        else:
+            # No existing transcription anywhere — reset to idle
+            self._reset_transcription_panel()
+
+    def _reset_transcription_panel(self):
+        """Clear the transcription/insights panel back to its idle state."""
+        if not hasattr(self, "transcription_textbox") or not self.transcription_textbox.winfo_exists():
+            return
+
+        self.transcription_status_label.configure(
+            text="Select a file and click 'Get Insights' to see transcription and AI analysis."
+        )
+
+        self.transcription_textbox.configure(state="normal")
+        self.transcription_textbox.delete("1.0", "end")
+        self.transcription_textbox.configure(state="disabled")
+
+        self.insights_textbox.configure(state="normal")
+        self.insights_textbox.delete("1.0", "end")
+        self.insights_textbox.configure(state="disabled")
+
+        # Hide content sections
+        self.transcription_section.pack_forget()
+        self.insights_section.pack_forget()
+        self.transcription_content_loaded = False
+
     def _toggle_transcription_panel(self):
         """Toggle visibility of the transcription panel."""
         if self.transcription_panel_visible:
@@ -2661,6 +2825,14 @@ class HiDockToolGUI(
 
     def get_insights_selected_file_gui(self):
         """Get insights for the selected file and display in the integrated panel."""
+        _dbg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs", "transcription_debug.txt")
+        def _dbg(msg):
+            import datetime
+            try:
+                with open(_dbg_path, "a", encoding="utf-8") as _f:
+                    _f.write(f"[{datetime.datetime.now()}] GUI::{msg}\n"); _f.flush()
+            except Exception: pass
+        _dbg("get_insights_selected_file_gui ENTERED")
         selected_iids = self.file_tree.selection()
         if not selected_iids:
             messagebox.showinfo("No Selection", "Please select a file to analyze.", parent=self)
@@ -2684,20 +2856,171 @@ class HiDockToolGUI(
         # Call the existing transcription method but capture results for UI display
         self._transcribe_selected_audio_gemini_for_panel(file_iid)
 
+    def export_selected_as_mp3_gui(self):
+        """Convert the selected HDA file to MP3 and save it to the audio-mp3 output folder."""
+        import shutil
+        import threading
+
+        selected_iids = self.file_tree.selection()
+        if not selected_iids:
+            messagebox.showinfo("No Selection", "Please select a file to export.", parent=self)
+            return
+
+        if len(selected_iids) > 1:
+            messagebox.showinfo(
+                "Multiple Selection",
+                "Please select only one file for MP3 export.",
+                parent=self,
+            )
+            return
+
+        file_iid = selected_iids[0]
+        # Resolve the actual local path using the same logic as the button-enable check:
+        # displayed_files_details first (already computed), then offline_mode_manager
+        # which checks metadata cache, .wav and .hda variants.
+        file_detail = next((f for f in self.displayed_files_details if f["name"] == file_iid), None)
+        local_path = file_detail.get("local_path") if file_detail else None
+        if not local_path or not os.path.exists(local_path):
+            if hasattr(self, "offline_mode_manager"):
+                local_path = self.offline_mode_manager.get_offline_file_path(file_iid)
+        if not local_path or not os.path.exists(local_path):
+            fallback_path = self._get_local_filepath(file_iid)
+            messagebox.showerror(
+                "File Not Found",
+                f"The file must be downloaded before exporting.\nExpected path:\n{fallback_path}",
+                parent=self,
+            )
+            return
+
+        # Derive the mp3 output directory as a sibling of the download directory
+        download_dir = getattr(self, "download_directory", None) or self.config.get("download_directory", "")
+        if not os.path.isabs(download_dir):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            app_root = os.path.dirname(script_dir)
+            download_dir = os.path.abspath(os.path.join(app_root, download_dir))
+
+        mp3_output_dir = os.path.normpath(os.path.join(os.path.dirname(download_dir), "audio-mp3"))
+
+        base_name = os.path.splitext(os.path.basename(local_path))[0]
+        mp3_output_path = os.path.normpath(os.path.join(mp3_output_dir, f"{base_name}.mp3"))
+
+        # Don't overwrite silently — ask the user
+        if os.path.exists(mp3_output_path):
+            overwrite = messagebox.askyesno(
+                "File Exists",
+                f"An MP3 file already exists at:\n{mp3_output_path}\n\nOverwrite it?",
+                parent=self,
+            )
+            if not overwrite:
+                return
+
+        self._set_long_operation_active_state(True, "MP3 Export")
+        self.update_status_bar(progress_text=f"Exporting {os.path.basename(local_path)} to MP3…")
+
+        def _worker():
+            try:
+                os.makedirs(mp3_output_dir, exist_ok=True)
+                from hta_converter import convert_hta_for_transcription
+
+                result_path = convert_hta_for_transcription(local_path, mp3_output_path)
+                if result_path and os.path.exists(result_path):
+                    self.after(0, lambda rp=result_path: self._show_mp3_export_dialog(rp))
+                else:
+                    self.after(
+                        0,
+                        lambda: messagebox.showerror(
+                            "Export Failed",
+                            "Conversion did not produce an output file.\n"
+                            "Ensure pydub and ffmpeg are installed.",
+                            parent=self,
+                        ),
+                    )
+            except Exception as exc:
+                logger.error("GUI", "export_selected_as_mp3_gui", f"MP3 export error: {exc}")
+                exc_msg = str(exc)
+                self.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Export Error",
+                        f"An error occurred during export:\n{exc_msg}",
+                        parent=self,
+                    ),
+                )
+            finally:
+                self.after(0, lambda: self._set_long_operation_active_state(False, "MP3 Export"))
+                self.after(0, lambda: self.update_status_bar(progress_text=""))
+
+        threading.Thread(target=_worker, daemon=True, name="MP3ExportWorker").start()
+
+    def _show_mp3_export_dialog(self, result_path: str):
+        """Show a custom dialog after MP3 export with the full path and an Open Folder button."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Export Complete")
+        dialog.geometry("560x180")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        dialog.focus_set()
+
+        # Centre over parent
+        self.update_idletasks()
+        px, py = self.winfo_x(), self.winfo_y()
+        pw, ph = self.winfo_width(), self.winfo_height()
+        dialog.geometry(f"+{px + pw // 2 - 280}+{py + ph // 2 - 90}")
+
+        ctk.CTkLabel(dialog, text="✅  MP3 exported successfully", font=ctk.CTkFont(size=14, weight="bold")).pack(
+            pady=(16, 6)
+        )
+
+        # Selectable read-only path entry so users can copy it manually
+        path_var = tkinter.StringVar(value=result_path)
+        path_entry = ctk.CTkEntry(dialog, textvariable=path_var, state="normal", width=520)
+        path_entry.pack(padx=20, pady=(0, 12))
+        path_entry.configure(state="readonly")
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(pady=(0, 14))
+
+        def _open_folder():
+            folder = os.path.dirname(result_path)
+            if sys.platform == "win32":
+                os.startfile(folder)
+            elif sys.platform == "darwin":
+                subprocess.call(["open", folder])
+            else:
+                subprocess.call(["xdg-open", folder])
+
+        ctk.CTkButton(btn_frame, text="📂  Open Folder", command=_open_folder, width=140).pack(
+            side="left", padx=(0, 10)
+        )
+        ctk.CTkButton(btn_frame, text="OK", command=dialog.destroy, width=80).pack(side="left")
+
     def _transcribe_selected_audio_gemini_for_panel(self, file_iid):
         """Transcribe selected audio and display results in the integrated panel."""
         import os
         import threading
 
+        _dbg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs", "transcription_debug.txt")
+        def _dbg(msg):
+            import datetime
+            try:
+                with open(_dbg_path, "a", encoding="utf-8") as _f:
+                    _f.write(f"[{datetime.datetime.now()}] _transcribe::{msg}\n"); _f.flush()
+            except Exception: pass
+
+        _dbg(f"ENTERED | file_iid={file_iid}")
+
         # from transcription_module import process_audio_file_for_insights  # Future: for audio insights feature
 
         file_detail = next((f for f in self.displayed_files_details if f["name"] == file_iid), None)
         if not file_detail:
+            _dbg("EARLY RETURN: file_detail not found")
             messagebox.showerror("Transcription Error", "File details not found.", parent=self)
             return
 
         local_filepath = self._get_local_filepath(file_detail["name"])
+        _dbg(f"local_filepath={local_filepath} | exists={os.path.isfile(local_filepath)}")
         if not os.path.isfile(local_filepath):
+            _dbg("EARLY RETURN: local file not found")
             messagebox.showerror(
                 "File Not Found",
                 f"Local file not found: {local_filepath}\nPlease download the file first.",
@@ -2707,6 +3030,7 @@ class HiDockToolGUI(
 
         # Get API key from encrypted settings
         gemini_api_key = self.get_decrypted_api_key()
+        _dbg(f"api_key obtained: {'YES (len=' + str(len(gemini_api_key)) + ')' if gemini_api_key else 'NO/EMPTY'}")
         if not gemini_api_key:
             messagebox.showerror(
                 "API Key Missing",
@@ -2727,14 +3051,30 @@ class HiDockToolGUI(
 
         # Start transcription in background thread
         self._set_long_operation_active_state(True, "Transcription")
-        self.update_status_bar(progress_text=f"Transcribing {file_detail['name']} with Gemini...")
 
         # Reset cancellation flag
         self.transcription_cancelled = False
 
+        # Collect all Tkinter variable values here in the main thread.
+        # Accessing Tkinter StringVar/IntVar from a background thread is NOT
+        # thread-safe on Windows and causes the Tkinter event loop to deadlock,
+        # which freezes device polling, stops log writes, and hangs the UI.
+        provider = self.ai_api_provider_var.get()
+        self.update_status_bar(progress_text=f"Transcribing {file_detail['name']} with {provider.title()}...")
+        config = {
+            "model": self.ai_model_var.get(),
+            "temperature": self.ai_temperature_var.get(),
+            "max_tokens": self.ai_max_tokens_var.get(),
+            "base_url": getattr(self, f"ai_{provider}_base_url_var", None),
+            "region": getattr(self, f"ai_{provider}_region_var", None),
+        }
+        # Resolve any remaining Tkinter vars to plain Python values
+        config = {k: v.get() if hasattr(v, "get") else v for k, v in config.items() if v is not None}
+        language = self.ai_language_var.get()
+
         self.current_transcription_thread = threading.Thread(
             target=self._transcription_worker_for_panel,
-            args=(local_filepath, gemini_api_key, file_detail["name"]),
+            args=(local_filepath, gemini_api_key, file_detail["name"], provider, config, language),
             daemon=True,
         )
         self.current_transcription_thread.start()
@@ -2779,7 +3119,7 @@ class HiDockToolGUI(
         self.is_long_operation_active = active
         self.active_operation_name = label if active else None
         # Update UI state based on operation status
-        self._update_all_button_states()
+        self._update_menu_states()
         logger.debug(
             "GUI",
             "_set_long_operation_active_state",
@@ -2816,37 +3156,49 @@ class HiDockToolGUI(
         self.insights_textbox.insert("1.0", "Insights extraction was cancelled.")
         self.insights_textbox.configure(state="disabled")
 
-    def _transcription_worker_for_panel(self, file_path, api_key, original_filename):
-        """Background worker that processes transcription for the panel display."""
+    def _transcription_worker_for_panel(self, file_path, api_key, original_filename, provider, config, language):
+        """Background worker that processes transcription for the panel display.
+
+        NOTE: All parameters that come from Tkinter variables (provider, config, language)
+        MUST be resolved to plain Python values by the caller in the main thread before
+        this method is invoked.  Accessing Tkinter StringVar/IntVar from a non-main
+        thread on Windows causes Tkinter's event loop to deadlock.
+        """
+        import traceback as _tb
+
+        _dbg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs", "transcription_debug.txt")
+
+        def _dbg(msg):
+            try:
+                with open(_dbg_path, "a", encoding="utf-8") as _f:
+                    _f.write(f"[{__import__('datetime').datetime.now()}] {msg}\n")
+                    _f.flush()
+            except Exception:
+                pass
+
+        _dbg(f"Worker started | file={file_path} | provider={provider} | cancelled={self.transcription_cancelled}")
+
         try:
             # Check for cancellation before starting
             if self.transcription_cancelled:
+                _dbg("Cancelled at entry — returning early")
                 return
 
-            import asyncio
-
-            # Get AI provider configuration
-            provider = self.ai_api_provider_var.get()
-            config = {
-                "model": self.ai_model_var.get(),
-                "temperature": self.ai_temperature_var.get(),
-                "max_tokens": self.ai_max_tokens_var.get(),
-                "base_url": getattr(self, f"ai_{provider}_base_url_var", None),
-                "region": getattr(self, f"ai_{provider}_region_var", None),
-            }
-            # Clean up None values
-            config = {k: v.get() if hasattr(v, "get") else v for k, v in config.items() if v is not None}
-            language = self.ai_language_var.get()
-
-            # Since process_audio_file_for_insights is async, we need to run it in an event loop
-            results = asyncio.run(process_audio_file_for_insights(file_path, provider, api_key, config, language))
+            _dbg("Calling process_audio_file_for_insights ...")
+            # process_audio_file_for_insights is synchronous — call it directly.
+            # (Previously used asyncio.run() here, which caused a Windows ProactorEventLoop
+            # hang when invoked from a non-main thread.)
+            results = process_audio_file_for_insights(file_path, provider, api_key, config, language)
+            _dbg(f"process_audio_file_for_insights returned: keys={list(results.keys()) if isinstance(results, dict) else type(results)}")
 
             # Check for cancellation before updating UI
             if self.transcription_cancelled:
+                _dbg("Cancelled after processing — returning early")
                 return
 
             self.after(0, self._on_transcription_complete_for_panel, results, original_filename)
         except Exception as e:
+            _dbg(f"EXCEPTION: {e}\n{_tb.format_exc()}")
             if not self.transcription_cancelled:
                 logger.error(
                     "GUI",
@@ -2910,8 +3262,73 @@ class HiDockToolGUI(
 
             self.update_status_bar(progress_text=f"Transcription complete for {original_filename}.")
 
+            # Cache results so re-selecting this file reloads them without re-processing
+            if not hasattr(self, "_transcription_results_cache"):
+                self._transcription_results_cache = {}
+            self._transcription_results_cache[original_filename] = {
+                "transcription": transcription_text,
+                "insights": insights,
+            }
+
+            # Persist to the SQLite database so results survive app restarts
+            self._persist_transcription_to_db(original_filename, transcription_text, insights)
+
             # Mark content as loaded
             self.transcription_content_loaded = True
+
+    def _persist_transcription_to_db(self, filename: str, transcription_text: str, insights: dict):
+        """Save transcription text and AI insights to the SQLite metadata database.
+
+        Ensures a row exists for the file before writing (creates one if missing).
+        Errors are logged but never surfaced to the user — the in-memory cache is
+        always the source of truth for the current session.
+        """
+        try:
+            self._ensure_audio_metadata_initialized()
+            db = self._audio_metadata_db
+            if db is None:
+                return
+
+            # Create a DB row for the file if one does not exist yet
+            if db.get_metadata(filename) is None:
+                local_path = self._get_local_filepath(filename)
+                file_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+                db.create_file_entry(
+                    filename=filename,
+                    file_path=local_path if os.path.exists(local_path) else "",
+                    file_size=file_size,
+                    duration_seconds=0.0,
+                    date_created=datetime.now(),
+                )
+
+            # Save transcription text
+            db.save_transcription(filename, transcription_text)
+
+            # Save AI insights (map field names from transcription_module output)
+            db.save_ai_analysis(
+                filename=filename,
+                summary=insights.get("summary") or None,
+                participants=insights.get("participants") or None,
+                action_items=insights.get("action_items") or None,
+                topics=insights.get("topics") or None,
+                sentiment=insights.get("overall_sentiment_meeting") or insights.get("sentiment") or None,
+                key_quotes=insights.get("key_quotes") or None,
+            )
+
+            logger.info(
+                "GUI",
+                "_persist_transcription_to_db",
+                f"Saved transcription + insights to DB for '{filename}'",
+            )
+
+            # Immediately reflect the new status in the treeview row
+            self.after(0, lambda fn=filename: self._update_file_status_in_treeview(fn, "Analyzed", ("analyzed",)))
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error(
+                "GUI",
+                "_persist_transcription_to_db",
+                f"Failed to save transcription to DB for '{filename}': {exc}",
+            )
 
     def _format_insights_for_display(self, insights):
         """Format the insights dictionary for readable display."""

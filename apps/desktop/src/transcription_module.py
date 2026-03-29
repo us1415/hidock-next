@@ -101,7 +101,7 @@ def _call_gemini_api(payload: Dict[str, Any], api_key: str = "") -> Optional[Dic
         return None
 
 
-async def transcribe_audio(
+def transcribe_audio(
     audio_file_path: str,
     provider: str = "gemini",
     api_key: str = "",
@@ -154,7 +154,7 @@ async def transcribe_audio(
     return {"transcription": transcription_text}
 
 
-async def extract_meeting_insights(
+def extract_meeting_insights(
     transcription: str,
     provider: str = "gemini",
     api_key: str = "",
@@ -270,7 +270,7 @@ def _get_audio_duration(audio_path: str) -> int:
         return 0
 
 
-async def process_audio_file_for_insights(
+def process_audio_file_for_insights(
     audio_file_path: str,
     provider: str = "gemini",
     api_key: str = "",
@@ -399,11 +399,11 @@ async def process_audio_file_for_insights(
                     "process_audio_file",
                     "Combined method not available, falling back to two-step process",
                 )
-                transcription_result = await transcribe_audio(audio_file_path, provider, api_key, config, language)
+                transcription_result = transcribe_audio(audio_file_path, provider, api_key, config, language)
                 full_transcription = transcription_result.get("transcription", "")
 
                 if full_transcription and not full_transcription.startswith("Transcription failed"):
-                    meeting_insights = await extract_meeting_insights(full_transcription, provider, api_key, config)
+                    meeting_insights = extract_meeting_insights(full_transcription, provider, api_key, config)
                 else:
                     meeting_insights = {"summary": "N/A - Transcription failed"}
         else:
@@ -414,11 +414,11 @@ async def process_audio_file_for_insights(
                 "Using two-step process (transcription then analysis)",
             )
 
-            transcription_result = await transcribe_audio(audio_file_path, provider, api_key, config, language)
+            transcription_result = transcribe_audio(audio_file_path, provider, api_key, config, language)
             full_transcription = transcription_result.get("transcription", "")
 
             if full_transcription and not full_transcription.startswith("Transcription failed"):
-                meeting_insights = await extract_meeting_insights(full_transcription, provider, api_key, config)
+                meeting_insights = extract_meeting_insights(full_transcription, provider, api_key, config)
             else:
                 logger.warning(
                     "TranscriptionModule",
@@ -459,7 +459,7 @@ async def process_audio_file_for_insights(
     }
 
 
-async def main_test() -> None:
+def main_test() -> None:
     """
     Example usage for testing the module from the command line.
     Requires a valid audio file path and a GEMINI_API_KEY environment variable.
@@ -483,7 +483,7 @@ async def main_test() -> None:
         logger.warning("TranscriptionModuleTest", "main_test", msg)
         print(msg)
 
-    results = await process_audio_file_for_insights(test_audio_file, api_key)
+    results = process_audio_file_for_insights(test_audio_file, api_key)
 
     print("\n--- Transcription and Insights Results ---")
     print(json.dumps(results, indent=2))
@@ -495,8 +495,6 @@ if __name__ == "__main__":
     # To run:
     # 1. Set the `test_audio_file` variable in `main_test`.
     # 2. Set the `GEMINI_API_KEY` environment variable.
-    # 3. Run `python -m asyncio hidock-desktop-app/transcription_module.py`
-    import asyncio
-
+    # 3. Run `python transcription_module.py`
     print("Running transcription module test...")
-    asyncio.run(main_test())
+    main_test()

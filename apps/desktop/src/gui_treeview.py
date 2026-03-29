@@ -35,6 +35,7 @@ class TreeViewMixin:
         self.file_tree.tag_configure("recording", foreground="red", font=("Arial", 10, "bold"))
         self.file_tree.tag_configure("size_mismatch", foreground="orange")
         self.file_tree.tag_configure("downloaded_ok", foreground="green")
+        self.file_tree.tag_configure("analyzed", foreground="teal")
         self.file_tree.tag_configure("downloading", foreground="dark orange")
         self.file_tree.tag_configure("download", foreground="dark orange")  # For download operations
         self.file_tree.tag_configure("deleting", foreground="red")
@@ -180,7 +181,16 @@ class TreeViewMixin:
                 tags.append("recording")
                 status_text = "Recording"
             elif status_text == "Downloaded":
-                tags.append("downloaded_ok")
+                # Upgrade status to "Analyzed" if the DB has AI analysis for this file
+                db_status = self._get_db_processing_status(file_info.get("name", ""))
+                if db_status == "analyzed":
+                    status_text = "Analyzed"
+                    tags.append("analyzed")
+                elif db_status == "transcribed":
+                    status_text = "Transcribed"
+                    tags.append("analyzed")
+                else:
+                    tags.append("downloaded_ok")
             elif status_text == "Mismatch":
                 tags.append("size_mismatch")
             elif status_text == "Cancelled":
@@ -860,6 +870,29 @@ class TreeViewMixin:
         """Check if a status filter is currently active."""
         criteria = self.get_status_filter_criteria()
         return criteria.get("status_filter", "all") != "all"
+
+    def _get_db_processing_status(self, filename: str) -> str:
+        """Return a simple tag ('analyzed', 'transcribed', or '') for the given file.
+
+        Used by _populate_treeview_from_data to decide whether to show 'Analyzed',
+        'Transcribed', or the plain 'Downloaded' status.
+        """
+        if not filename or not hasattr(self, "_audio_metadata_db") or not self._audio_metadata_db:
+            return ""
+        try:
+            from audio_metadata_db import ProcessingStatus
+
+            metadata = self._audio_metadata_db.get_metadata(filename)
+            if not metadata:
+                return ""
+            ps = metadata.processing_status
+            if ps in (ProcessingStatus.AI_ANALYZED, ProcessingStatus.COMPLETED):
+                return "analyzed"
+            if ps == ProcessingStatus.TRANSCRIBED:
+                return "transcribed"
+        except Exception:
+            pass
+        return ""
 
     def _format_transcription_status(self, file_info: Dict[str, Any]) -> str:
         """Format transcription status for display in tree view column."""

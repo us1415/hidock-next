@@ -151,37 +151,17 @@ class AudioMetadataMixin:
         }
 
     def _get_meeting_column_display(self, metadata: AudioMetadata) -> str:
-        """Get text to display in the meeting column of TreeView."""
-        # Priority system for meeting column display:
-        # 1. User title (if set)
-        # 2. Short AI-generated meeting subject (5-8 words max)
-        # 3. Calendar meeting info (from calendar cache - keep existing)
-        # 4. Blank
-        #
-        # NOTE: Processing status (Transcribing..., Analyzing..., etc.) should NOT appear here
-        # They belong in the Transcription column instead
+        """Get text to display in the meeting column of TreeView.
 
+        Only returns a value when the user has manually set a title.
+        AI summaries are intentionally excluded — the Meeting column is
+        reserved for calendar-matched meeting names or user-set titles.
+        Returning None preserves whatever calendar text is already showing.
+        """
         if metadata.user_title:
             return metadata.user_title
-        elif metadata.ai_summary and metadata.processing_status in [
-            ProcessingStatus.COMPLETED,
-            ProcessingStatus.AI_ANALYZED,
-        ]:
-            # Generate a short subject line from the AI summary (5-8 words max)
-            # Extract first sentence or first 40-50 characters
-            first_line = metadata.ai_summary.split("\n")[0].strip()
-            first_sentence = first_line.split(".")[0].strip()
-
-            # Truncate to approximately 5-8 words (40-50 characters)
-            words = first_sentence.split()
-            if len(words) <= 8:
-                return first_sentence
-            else:
-                return " ".join(words[:8]) + "..."
-        else:
-            # Return None to preserve existing calendar meeting display
-            # Do NOT show processing status messages here
-            return None
+        # Return None to preserve existing calendar meeting display (or leave blank)
+        return None
 
     def start_audio_processing(self, filename: str) -> bool:
         """Start processing an audio file (transcription + AI analysis)."""

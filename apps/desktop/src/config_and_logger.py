@@ -17,6 +17,7 @@ for other modules to import and use.
 import json
 import os
 import sys
+import threading
 from datetime import datetime
 
 # Import constants that might be needed for default config values
@@ -74,6 +75,7 @@ def get_default_config() -> dict:
         "icon_fallback_color_2": "default",
         "icon_size_str": "32",
         "calendar_chunking_period": "1 Week",
+        "enable_calendar_integration": False,  # Opt-in: user must explicitly enable calendar sync
         "enable_file_logging": True,
         "log_file_path": "test_hidock.log",
         "log_file_max_size_mb": 10,
@@ -483,14 +485,20 @@ class Logger:
             else:
                 print(console_message)
 
-        # GUI output - check if enabled and meets level threshold
+        # GUI output - check if enabled and meets level threshold.
+        # IMPORTANT: GUI callbacks must only be invoked from the main thread.
+        # Calling Tkinter APIs (StringVar.get, widget.insert, etc.) from a
+        # background thread on Windows causes the Tcl interpreter to deadlock.
+        # We simply skip the GUI callbacks when called from a non-main thread;
+        # the message is still written to the log file and console below.
+        _in_main_thread = threading.current_thread() is threading.main_thread()
         gui_threshold = force_level if force_level is not None else getattr(self, 'gui_level', self.level)
         gui_enabled = self.config.get("enable_gui_logging", not self.config.get("suppress_gui_log_output", False))
-        if gui_enabled and msg_level_val >= gui_threshold:
+        if _in_main_thread and gui_enabled and msg_level_val >= gui_threshold:
             # Call the original GUI callback if set
             if self.gui_log_callback:
                 self.gui_log_callback(base_log_message + "\n", level_str.upper())
-            
+
             # Call all additional GUI callbacks (for auto-show functionality, etc.)
             for callback in self.gui_callbacks:
                 try:

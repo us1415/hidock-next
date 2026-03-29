@@ -100,28 +100,34 @@ class GeminiProvider(AIProvider):
 
     def validate_api_key(self) -> bool:
         """Validate Gemini API key by making a test request"""
-        if not self.is_available() or not self.client:
+        if not self.is_available():
             return False
 
+        import concurrent.futures
+
         try:
-            # Use configured model or default to gemini-2.0-flash-exp
-            model_name = self.config.get("model", "gemini-2.0-flash-exp")
+            # Use a fast, stable model for validation only — not the user's selected model
+            validation_model = "gemini-2.0-flash"
 
-            # Normalize legacy model names
-            model_name = normalize_model_name(model_name)
+            logger.info("GeminiProvider", "validate_api_key", f"Validating API key with model: {validation_model}")
 
-            # Validate model name
-            if not is_valid_model_name(model_name):
-                logger.warning("GeminiProvider", "validate_api_key", f"Unknown model name: {model_name}, using default")
-                model_name = "gemini-2.0-flash-exp"
+            # Create a client with a short timeout specifically for validation
+            validation_client = genai.Client(api_key=self.api_key, http_options={"timeout": 15})
 
-            logger.info("GeminiProvider", "validate_api_key", f"Validating API key with model: {model_name}")
+            def _call():
+                return validation_client.models.generate_content(
+                    model=validation_model,
+                    contents="Hi"
+                )
 
-            response = self.client.models.generate_content(
-                model=model_name,
-                contents="Test validation message"
-            )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_call)
+                response = future.result(timeout=15)
+
             return bool(response and response.text)
+        except concurrent.futures.TimeoutError:
+            logger.error("GeminiProvider", "validate_api_key", "API validation timed out after 15 seconds")
+            return False
         except Exception as e:
             logger.error("GeminiProvider", "validate_api_key", f"API validation failed: {e}")
             return False
@@ -469,7 +475,7 @@ class OpenAIProvider(AIProvider):
         try:
             # Make a simple completion request to test the API key
             response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model="gpt-4o-mini",
                 messages=[{"role": "user", "content": "Test"}],
                 max_tokens=5,
             )
@@ -503,14 +509,46 @@ class OpenAIProvider(AIProvider):
             logger.error("OpenAIProvider", "transcribe_audio", f"Error: {e}")
             return {"success": False, "error": str(e), "provider": "openai"}
 
+    @staticmethod
+    def _estimate_context_limit(model_name: str) -> int:
+        """Estimate max context tokens for a given OpenAI model name."""
+        name = model_name.lower()
+        if any(x in name for x in ["gpt-4o", "gpt-4-turbo", "gpt-4-1106", "gpt-4-0125"]):
+            return 128_000
+        if "gpt-4-32k" in name:
+            return 32_768
+        if "gpt-4" in name:
+            return 8_192
+        if "gpt-3.5-turbo-16k" in name:
+            return 16_384
+        # gpt-3.5-turbo (4k), unknown models — use 8 192 as a safe floor
+        return 8_192
+
     def analyze_text(self, text: str, analysis_type: str = "insights") -> Dict[str, Any]:
         """Analyze text using OpenAI GPT"""
         if not self.is_available():
             return self._mock_response("analysis")
 
         try:
+            model_name = self.config.get("model", "gpt-4o-mini")
+            context_limit = self._estimate_context_limit(model_name)
+
+            # Cap completion tokens: default 1 500 (was 4 000) so it fits small-context models.
+            max_tokens = min(self.config.get("max_tokens", 1_500), 1_500)
+
+            # Reserve budget: prompt template (~200 tokens) + completion
+            max_text_chars = (context_limit - max_tokens - 200) * 4  # ~4 chars/token
+            if len(text) > max_text_chars:
+                logger.warning(
+                    "OpenAIProvider",
+                    "analyze_text",
+                    f"Transcription too long ({len(text)} chars) for model context "
+                    f"({context_limit} tokens). Truncating to {max_text_chars} chars.",
+                )
+                text = text[:max_text_chars] + "\n[...truncated to fit model context limit...]"
+
             response = self.client.chat.completions.create(
-                model=self.config.get("model", "gpt-4o-mini"),
+                model=model_name,
                 messages=[
                     {
                         "role": "system",
@@ -536,7 +574,7 @@ class OpenAIProvider(AIProvider):
                     },
                 ],
                 temperature=self.config.get("temperature", 0.3),
-                max_tokens=self.config.get("max_tokens", 4000),
+                max_tokens=max_tokens,
             )
 
             response_text = response.choices[0].message.content.strip()
@@ -593,7 +631,7 @@ class AnthropicProvider(AIProvider):
         try:
             # Make a simple message request to test the API key
             response = self.client.messages.create(
-                model="claude-3-haiku-20240307",
+                model="claude-haiku-4-5",
                 max_tokens=5,
                 messages=[{"role": "user", "content": "Test"}],
             )
@@ -700,7 +738,7 @@ class OpenRouterProvider(AIProvider):
                 f"{self.base_url}/chat/completions",
                 headers=headers,
                 json={
-                    "model": "openai/gpt-3.5-turbo",
+                    "model": "openai/gpt-4o-mini",
                     "messages": [{"role": "user", "content": "Test"}],
                     "max_tokens": 5,
                 },

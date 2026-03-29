@@ -648,6 +648,11 @@ class EventHandlersMixin:
             if len(selection) == 1:
                 self._update_waveform_for_selection()
 
+            # Update the transcription/insights panel to match the new selection
+            # (loads cached DB data if available, otherwise resets to idle state)
+            if hasattr(self, "_update_transcription_panel_for_selection"):
+                self._update_transcription_panel_for_selection()
+
             # Skip status updates for simple selections - only update if cache is stale
             current_time = time.time()
             should_update_status = not self._status_update_in_progress and (

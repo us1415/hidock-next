@@ -50,6 +50,14 @@ class AsyncCalendarMixin:
         if not SIMPLE_CALENDAR_AVAILABLE:
             logger.debug("AsyncCalendar", "init", "Simple calendar integration not available")
             return
+
+        # Respect the user's enable_calendar_integration preference.
+        # If the setting is disabled we skip ALL calendar setup — no cache
+        # manager, no Outlook connection, no background worker thread.
+        config = load_config()
+        if not config.get("enable_calendar_integration", True):
+            logger.info("AsyncCalendar", "init", "Calendar integration disabled by user setting — skipping init")
+            return
         
         try:
             # Initialize cache manager
@@ -714,6 +722,13 @@ class AsyncCalendarMixin:
             enhanced_file.update(self._create_empty_meeting_fields())
             immediate_files.append(enhanced_file)
         
+        # Respect the user's enable_calendar_integration preference.
+        config = load_config()
+        if not config.get("enable_calendar_integration", True):
+            logger.debug("AsyncCalendar", "enhance_files_async",
+                         "Calendar integration disabled by user setting — skipping background sync")
+            return immediate_files
+
         # Queue background work to enhance with real calendar data
         if SIMPLE_CALENDAR_AVAILABLE and self._calendar_cache_manager:
             work_item = {
@@ -967,6 +982,18 @@ class AsyncCalendarMixin:
                 enhanced_files.append(enhanced_file)
             return enhanced_files
         
+        # Respect the user's enable_calendar_integration preference.
+        config = load_config()
+        if not config.get("enable_calendar_integration", True):
+            logger.debug("AsyncCalendar", "enhance_sync",
+                         "Calendar integration disabled by user setting — skipping sync enhancement")
+            enhanced_files = []
+            for file_data in files_dict:
+                enhanced_file = file_data.copy()
+                enhanced_file.update(self._create_empty_meeting_fields())
+                enhanced_files.append(enhanced_file)
+            return enhanced_files
+
         logger.info("AsyncCalendar", "enhance_sync", f"Synchronously enhancing {len(files_dict)} files with cached meeting data")
         
         enhanced_files = []

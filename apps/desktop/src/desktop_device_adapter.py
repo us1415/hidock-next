@@ -74,11 +74,18 @@ class DesktopDeviceAdapter(IDeviceInterface):
                         if found_device:
                             model = detect_device_model(vid, pid)
 
+                            # serial_number is a PyUSB property that reads from USB —
+                            # it can raise on Windows if another driver owns the interface.
+                            try:
+                                serial_number = found_device.serial_number or "Unknown"
+                            except Exception:
+                                serial_number = "Unknown"
+
                             device_info = DeviceInfo(
                                 id=f"{vid:04x}:{pid:04x}",
                                 name=f"HiDock {model.value}",
                                 model=model,
-                                serial_number=getattr(found_device, "serial_number", "Unknown"),
+                                serial_number=serial_number,
                                 firmware_version="1.0.0",  # Would need to be queried
                                 vendor_id=vid,
                                 product_id=pid,
@@ -86,6 +93,11 @@ class DesktopDeviceAdapter(IDeviceInterface):
                                 last_seen=datetime.now(),
                             )
                             devices.append(device_info)
+                            logger.info(
+                                "DesktopDeviceAdapter",
+                                "discover_devices",
+                                f"Discovered HiDock device: VID={vid:#06x} PID={pid:#06x} model={model.value}",
+                            )
 
                     except Exception as e:
                         logger.debug(
@@ -149,6 +161,40 @@ class DesktopDeviceAdapter(IDeviceInterface):
                     success, error_msg = self.jensen_device.connect(
                         target_interface_number=0, vid=vid, pid=pid, auto_retry=False, force_reset=True
                     )
+
+                # If device not found with the configured VID/PID, scan all known combinations
+                if not success and "not found" in str(error_msg).lower():
+                    logger.info(
+                        "DesktopDeviceAdapter",
+                        "connect",
+                        f"Device not found at VID={hex(vid)}/PID={hex(pid)}, scanning all known HiDock devices...",
+                    )
+                    for try_vid in ALL_VENDOR_IDS:
+                        for try_pid in HIDOCK_PRODUCT_IDS:
+                            if try_vid == vid and try_pid == pid:
+                                continue  # already tried this combination
+                            logger.debug(
+                                "DesktopDeviceAdapter",
+                                "connect",
+                                f"Trying VID={hex(try_vid)}/PID={hex(try_pid)}...",
+                            )
+                            success, error_msg = self.jensen_device.connect(
+                                target_interface_number=0,
+                                vid=try_vid,
+                                pid=try_pid,
+                                auto_retry=False,
+                                force_reset=force_reset,
+                            )
+                            if success:
+                                logger.info(
+                                    "DesktopDeviceAdapter",
+                                    "connect",
+                                    f"Connected via auto-scan: VID={hex(try_vid)}/PID={hex(try_pid)}",
+                                )
+                                vid, pid = try_vid, try_pid
+                                break
+                        if success:
+                            break
 
                 if not success:
                     raise ConnectionError(error_msg or "Connection failed")

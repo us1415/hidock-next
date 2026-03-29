@@ -1301,15 +1301,14 @@ class SettingsDialog(ctk.CTkToplevel):
                 "gpt-4o-mini",
                 "gpt-4-turbo",
                 "gpt-4",
-                "gpt-3.5-turbo",
                 "whisper-1",
             ],
             "anthropic": [
+                "claude-opus-4-5",
+                "claude-sonnet-4-5",
+                "claude-haiku-4-5",
                 "claude-3-5-sonnet-20241022",
                 "claude-3-5-haiku-20241022",
-                "claude-3-opus-20240229",
-                "claude-3-sonnet-20240229",
-                "claude-3-haiku-20240307",
             ],
             "openrouter": [
                 "anthropic/claude-3.5-sonnet",
@@ -1387,13 +1386,17 @@ class SettingsDialog(ctk.CTkToplevel):
         if not ENCRYPTION_AVAILABLE:
             return None
 
-        # Try to load existing key from config directory
+        # Resolve a consistent absolute directory for the key file.
+        # Prefer the explicit config_file_path, then fall back to the app's
+        # config/ directory (derived from this file's location), then CWD.
         config_file_path = self.parent_gui.config.get("config_file_path", "")
         if config_file_path:
-            config_dir = os.path.dirname(config_file_path)
+            config_dir = os.path.dirname(os.path.abspath(config_file_path))
         else:
-            # Fallback to current directory if config path not available
-            config_dir = os.getcwd()
+            # Use the app root's config/ directory (always consistent regardless of CWD)
+            _src_dir = os.path.dirname(os.path.abspath(__file__))   # .../apps/desktop/src
+            _app_root = os.path.dirname(_src_dir)                    # .../apps/desktop
+            config_dir = os.path.join(_app_root, "config")
 
         key_file = os.path.join(config_dir, ".hidock_key.dat")
 
@@ -1402,6 +1405,8 @@ class SettingsDialog(ctk.CTkToplevel):
                 with open(key_file, "rb") as f:
                     return f.read()
             else:
+                # Ensure the directory exists before writing
+                os.makedirs(config_dir, exist_ok=True)
                 # Generate new key
                 key = Fernet.generate_key()
                 with open(key_file, "wb") as f:
@@ -1453,16 +1458,9 @@ class SettingsDialog(ctk.CTkToplevel):
             return ""
         except Exception as e:
             logger.error("SettingsDialog", "_decrypt_api_key", f"Error decrypting API key: {e}")
-            # If decryption fails, it might be due to a corrupted key file
-            # Try to regenerate the encryption key
-            try:
-                config_dir = os.path.dirname(self.parent_gui.config.get("config_file_path", ""))
-                key_file = os.path.join(config_dir, ".hidock_key.dat")
-                if os.path.exists(key_file):
-                    os.remove(key_file)
-                    logger.info("SettingsDialog", "_decrypt_api_key", "Removed corrupted encryption key file")
-            except Exception as cleanup_error:
-                logger.warning("SettingsDialog", "_decrypt_api_key", f"Could not clean up key file: {cleanup_error}")
+            # Do NOT delete the key file here — it may be valid and the error could be
+            # a temporary issue or a key mismatch for a different provider's entry.
+            # Deleting the key would permanently destroy ALL other encrypted keys.
             return ""
 
     def _load_api_key_status(self):
@@ -1473,7 +1471,9 @@ class SettingsDialog(ctk.CTkToplevel):
 
             if hasattr(self, "api_key_entry") and hasattr(self, "api_key_status_label"):
                 if encrypted_key:
-                    decrypted_key = self._decrypt_api_key(encrypted_key)
+                    # Reuse the main window's multi-directory key search — it already works
+                    # and handles all path variants consistently.
+                    decrypted_key = self.parent_gui.get_decrypted_api_key(provider)
                     if decrypted_key:
                         self.api_key_entry.delete(0, "end")
                         self.api_key_entry.insert(0, decrypted_key)
@@ -1544,13 +1544,14 @@ class SettingsDialog(ctk.CTkToplevel):
     def _validation_complete(self, success):
         """Called when API key validation completes."""
         if hasattr(self, "api_key_status_label") and hasattr(self, "validate_key_button"):
+            # Re-enable button first so it's never stuck disabled, regardless of what follows
+            self.validate_key_button.configure(state="normal")
             if success:
                 self.api_key_status_label.configure(text="Status: Valid API key", text_color="green")
                 # Save the validated API key
                 self._save_api_key()
             else:
                 self.api_key_status_label.configure(text="Status: Invalid API key", text_color="red")
-            self.validate_key_button.configure(state="normal")
 
     def _save_api_key(self, event=None):
         """Save the API key for the current provider."""
