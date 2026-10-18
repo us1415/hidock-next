@@ -13,6 +13,33 @@ Replace the manual P1 workflow—work computer to phone to Otter—with a reliab
 5. Store, search, rename, export, and back up transcripts without changing their source dates.
 6. Learn reusable speaker identities from corrected historical and future transcripts.
 
+## Resume checkpoint — start here next session
+
+The ingestion, chronology, Otter reconciliation, export/backup, and reusable speaker-identity foundations are complete.
+The next active phase is **per-recording speaker review and confirmation**. Do not move directly to universal document
+ingestion or enable automatic paid transcription before completing this gate.
+
+Current live state at the stopping point:
+
+- Schema v29 is active; startup reports 645 recordings and 0 integrity issues.
+- `Joel K` is the preserved self identity across 521 transcripts.
+- All 111 named identities remain confirmed; 19 generic labels remain deliberately unresolved per recording.
+- Priority Voice is saved for Brian M, Jack Quinn, Joey A, Maura, Nayana, Noah Weinthal, Roberto, and Zach Roberts.
+- All eight priority identities have a valid locally extracted historical reference sample.
+- OpenAI `gpt-4o-transcribe-diarize` is configured, while automatic transcription remains off.
+- No paid diarized transcription has yet been used to validate the new identity-reference path end to end.
+
+Start the next session by:
+
+1. Add durable per-recording speaker assignments with `pending`, `confirmed`, and `corrected` states plus traceable evidence.
+2. Add a review interface that shows diarized segments and lets the user confirm or correct each detected identity.
+3. Ensure pending/uncertain assignments never become permanent reusable identity evidence.
+4. With explicit user approval, manually transcribe one representative P1 meeting containing known Priority Voices.
+5. Verify speaker continuity, names, chronology, cost/history reporting, and correction reuse before considering automation.
+
+OpenAI diarization does not return speaker-assignment confidence. Any confidence shown by HiDock Next must therefore be
+an application-owned evidence score, clearly distinguished from provider output.
+
 ## Safety rules
 
 - Automatic device download and paid transcription remain off by default.
