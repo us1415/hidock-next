@@ -230,6 +230,16 @@ export function renameSpeakerIdentity(identityId: string, displayName: string, n
   return getSpeakerOverview().identities.find((identity) => identity.id === identityId)!
 }
 
+export function confirmAllSpeakerIdentities(now = new Date().toISOString()): SpeakerOverview {
+  runInTransaction(() => {
+    getDatabase().run(
+      "UPDATE speaker_identities SET status = 'confirmed', updated_at = ? WHERE status = 'needs-review'",
+      [now]
+    )
+  })
+  return getSpeakerOverview()
+}
+
 export function mergeSpeakerIdentities(sourceId: string, targetId: string, now = new Date().toISOString()): SpeakerIdentity {
   if (sourceId === targetId) throw new Error('Choose two different speaker identities.')
   const source = queryOne<IdentityRow>('SELECT * FROM speaker_identities WHERE id = ?', [sourceId])

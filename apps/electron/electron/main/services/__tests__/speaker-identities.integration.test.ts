@@ -17,6 +17,7 @@ vi.mock('../file-storage', () => ({
 import * as database from '../database'
 import {
   assignSpeakerAlias,
+  confirmAllSpeakerIdentities,
   mergeSpeakerIdentities,
   rebuildSpeakerIndex,
   renameSpeakerIdentity
@@ -69,6 +70,9 @@ describe('speaker identity evidence index', () => {
     expect(overview.counts).toMatchObject({ identities: 2, rawLabels: 4, unresolvedAliases: 1 })
     expect(overview.identities.find((identity) => identity.displayName === 'Joel K')?.aliases.map((alias) => alias.rawLabel).sort())
       .toEqual(['Joel K', 'joel k.'])
+
+    overview = confirmAllSpeakerIdentities('2026-10-18T12:00:30.000Z')
+    expect(overview.counts).toMatchObject({ confirmed: 2, needsReview: 0 })
 
     const joel = overview.identities.find((identity) => identity.displayName === 'Joel K')!
     renameSpeakerIdentity(joel.id, 'Joel Khan', '2026-10-18T12:01:00.000Z')

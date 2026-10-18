@@ -32,6 +32,7 @@ export function SpeakerIdentityManager() {
   const [names, setNames] = useState<Record<string, string>>({})
   const [mergeTargets, setMergeTargets] = useState<Record<string, string>>({})
   const [mergeRequest, setMergeRequest] = useState<MergeRequest | null>(null)
+  const [confirmAllOpen, setConfirmAllOpen] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -71,6 +72,17 @@ export function SpeakerIdentityManager() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const confirmAll = async () => {
+    const result = await window.electronAPI.speakers.confirmAll()
+    if (!result.success) {
+      toast.error('Speakers not confirmed', errorMessage(result, 'Unable to confirm speaker identities'))
+    } else {
+      setOverview(result.data)
+      toast.success('Named speakers confirmed', `${result.data.counts.confirmed} identities are now confirmed`)
+    }
+    setConfirmAllOpen(false)
   }
 
   const saveName = async (identity: SpeakerIdentity) => {
@@ -122,6 +134,11 @@ export function SpeakerIdentityManager() {
               <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
               Normalize transcript history
             </Button>
+            {!!overview?.counts.needsReview && (
+              <Button size="sm" onClick={() => setConfirmAllOpen(true)} disabled={loading}>
+                <UserRoundCheck className="mr-2 h-4 w-4" /> Confirm all named
+              </Button>
+            )}
           </div>
         </CardHeader>
         <CardContent>
@@ -240,6 +257,22 @@ export function SpeakerIdentityManager() {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={confirmMerge}>Merge identities</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={confirmAllOpen} onOpenChange={setConfirmAllOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Confirm all named speakers?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This marks all {overview?.counts.needsReview || 0} named identities as trusted Otter labels.
+              Generic labels such as “Speaker 1” will remain unresolved.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmAll}>Confirm named speakers</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

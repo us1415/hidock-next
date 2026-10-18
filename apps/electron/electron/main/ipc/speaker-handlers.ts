@@ -2,6 +2,7 @@ import { ipcMain } from 'electron'
 import { error, Result, success } from '../types/api'
 import {
   assignSpeakerAlias,
+  confirmAllSpeakerIdentities,
   getSpeakerOverview,
   mergeSpeakerIdentities,
   rebuildSpeakerIndex,
@@ -36,6 +37,14 @@ export function registerSpeakerHandlers(): void {
       return success(rebuildSpeakerIndex())
     } catch (cause) {
       return failure('Failed to normalize transcript speaker labels', cause)
+    }
+  })
+
+  ipcMain.handle('speakers:confirmAll', async (): Promise<Result<SpeakerOverview>> => {
+    try {
+      return success(confirmAllSpeakerIdentities())
+    } catch (cause) {
+      return failure('Failed to confirm speaker identities', cause)
     }
   })
 

@@ -166,6 +166,7 @@ export interface ElectronAPI {
   speakers: {
     getOverview: () => Promise<Result<SpeakerOverview>>
     rebuild: () => Promise<Result<SpeakerOverview>>
+    confirmAll: () => Promise<Result<SpeakerOverview>>
     renameIdentity: (request: { identityId: string; displayName: string }) => Promise<Result<SpeakerIdentity>>
     mergeIdentities: (request: { sourceId: string; targetId: string }) => Promise<Result<SpeakerIdentity>>
     assignAlias: (request: { aliasId: string; identityId: string }) => Promise<Result<SpeakerIdentity>>
@@ -811,6 +812,7 @@ const electronAPI: ElectronAPI = {
   speakers: {
     getOverview: () => callIPC('speakers:getOverview'),
     rebuild: () => callIPC('speakers:rebuild'),
+    confirmAll: () => callIPC('speakers:confirmAll'),
     renameIdentity: (request) => callIPC('speakers:renameIdentity', request),
     mergeIdentities: (request) => callIPC('speakers:mergeIdentities', request),
     assignAlias: (request) => callIPC('speakers:assignAlias', request)
