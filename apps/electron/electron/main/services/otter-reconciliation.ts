@@ -6,6 +6,16 @@ const execFileAsync = promisify(execFile)
 const P1_BYTES_PER_SECOND = 12_000
 const DURATION_MATCH_TOLERANCE_SECONDS = 5
 
+export type OtterReconciliationDecision = 'pending' | 'confirmed' | 'separate'
+
+export interface OtterReconciliationReview {
+  importedRecordingId: string
+  deviceFilename: string | null
+  decision: OtterReconciliationDecision
+  matchMethod: OtterReconciliationMatch['method'] | null
+  reviewedAt: string | null
+}
+
 export interface ReconciliationDeviceFile {
   filename: string
   size: number
@@ -21,6 +31,7 @@ export interface OtterReconciliationMatch {
   method: 'exact-timestamp' | 'date-duration' | 'adjacent-date-duration'
   confidence: number
   durationDifferenceSeconds?: number
+  reviewDecision: OtterReconciliationDecision
 }
 
 export interface OtterReconciliationUnresolvedItem {
@@ -33,6 +44,7 @@ export interface OtterReconciliationUnresolvedItem {
     deviceRecordedAt: string
     durationDifferenceSeconds: number | null
   }>
+  reviewDecision: OtterReconciliationDecision
 }
 
 export interface OtterReconciliationPreview {
@@ -53,6 +65,9 @@ export interface OtterReconciliationPreview {
     provisionalMatches: number
     unresolvedOverlapping: number
     deviceWithoutOtterMatch: number
+    reviewedConfirmed: number
+    reviewedSeparate: number
+    reviewPending: number
   }
   matches: OtterReconciliationMatch[]
   unresolved: OtterReconciliationUnresolvedItem[]
@@ -121,7 +136,8 @@ export async function buildOtterReconciliationPreview(
   recordings: Recording[],
   deviceFiles: ReconciliationDeviceFile[],
   durationProvider: DurationProvider = probeAudioDurationSeconds,
-  generatedAt = new Date().toISOString()
+  generatedAt = new Date().toISOString(),
+  reviews: OtterReconciliationReview[] = []
 ): Promise<OtterReconciliationPreview> {
   const imported = recordings.filter((recording) => recording.is_imported === 1 && recording.source === 'import')
   const datedDeviceFiles = deviceFiles
@@ -163,7 +179,8 @@ export async function buildOtterReconciliationPreview(
       deviceFilename: device.filename,
       deviceRecordedAt: device.dateCreated,
       method: 'exact-timestamp',
-      confidence: 1
+      confidence: 1,
+      reviewDecision: 'pending'
     })
   }
 
@@ -232,7 +249,8 @@ export async function buildOtterReconciliationPreview(
       confidence: edge.dayOffset === 0
         ? Math.max(0.9, 0.99 - edge.difference / 100)
         : Math.max(0.85, 0.94 - edge.difference / 100),
-      durationDifferenceSeconds: edge.difference
+      durationDifferenceSeconds: edge.difference,
+      reviewDecision: 'pending'
     })
   }
 
@@ -261,7 +279,8 @@ export async function buildOtterReconciliationPreview(
       importedFilename: recording.filename,
       recordedDate: date,
       durationSeconds: importedDuration,
-      nearestCandidates
+      nearestCandidates,
+      reviewDecision: 'pending' as OtterReconciliationDecision
     }
   })
 
@@ -272,6 +291,25 @@ export async function buildOtterReconciliationPreview(
     const duration = allDurationByRecording.get(recording.id)
     return typeof duration === 'number' && duration >= 5
   }).length
+  const reviewByImportId = new Map(reviews.map((review) => [review.importedRecordingId, review]))
+  const reviewedMatches = matches.map((match) => {
+    const review = reviewByImportId.get(match.importedRecordingId)
+    const reviewDecision = review?.decision === 'separate'
+      ? 'separate'
+      : review?.decision === 'confirmed' && review.deviceFilename === match.deviceFilename
+        ? 'confirmed'
+        : 'pending'
+    return { ...match, reviewDecision } as OtterReconciliationMatch
+  })
+  const reviewedUnresolved = unresolved.map((item) => ({
+    ...item,
+    reviewDecision: reviewByImportId.get(item.importedRecordingId)?.decision === 'separate'
+      ? 'separate' as const
+      : 'pending' as const
+  }))
+  const reviewedItems = [...reviewedMatches, ...reviewedUnresolved]
+  const reviewedConfirmed = reviewedItems.filter((item) => item.reviewDecision === 'confirmed').length
+  const reviewedSeparate = reviewedItems.filter((item) => item.reviewDecision === 'separate').length
   return {
     generatedAt,
     deviceInventoryStart: inventoryStart,
@@ -289,9 +327,12 @@ export async function buildOtterReconciliationPreview(
       adjacentDateDurationMatches,
       provisionalMatches: matches.length,
       unresolvedOverlapping: unresolved.length,
-      deviceWithoutOtterMatch: Math.max(0, deviceFiles.length - usedDeviceFiles.size)
+      deviceWithoutOtterMatch: Math.max(0, deviceFiles.length - usedDeviceFiles.size),
+      reviewedConfirmed,
+      reviewedSeparate,
+      reviewPending: reviewedItems.length - reviewedConfirmed - reviewedSeparate
     },
-    matches,
-    unresolved
+    matches: reviewedMatches,
+    unresolved: reviewedUnresolved
   }
 }

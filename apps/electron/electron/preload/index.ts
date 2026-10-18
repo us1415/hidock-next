@@ -313,6 +313,9 @@ export interface ElectronAPI {
           provisionalMatches: number
           unresolvedOverlapping: number
           deviceWithoutOtterMatch: number
+          reviewedConfirmed: number
+          reviewedSeparate: number
+          reviewPending: number
         }
         matches: Array<{
           importedRecordingId: string
@@ -322,6 +325,7 @@ export interface ElectronAPI {
           method: 'exact-timestamp' | 'date-duration' | 'adjacent-date-duration'
           confidence: number
           durationDifferenceSeconds?: number
+          reviewDecision: 'pending' | 'confirmed' | 'separate'
         }>
         unresolved: Array<{
           importedRecordingId: string
@@ -333,9 +337,16 @@ export interface ElectronAPI {
             deviceRecordedAt: string
             durationDifferenceSeconds: number | null
           }>
+          reviewDecision: 'pending' | 'confirmed' | 'separate'
         }>
       }
     }>
+    saveOtterReconciliationReviews: (reviews: Array<{
+      importedRecordingId: string
+      deviceFilename: string | null
+      decision: 'pending' | 'confirmed' | 'separate'
+      matchMethod: 'exact-timestamp' | 'date-duration' | 'adjacent-date-duration' | null
+    }>) => Promise<{ success: boolean; saved?: number; error?: string }>
     previewOtter: () => Promise<{
       success: boolean
       canceled?: boolean
@@ -808,6 +819,7 @@ const electronAPI: ElectronAPI = {
 
   imports: {
     previewOtterReconciliation: () => callIPC('imports:preview-otter-reconciliation'),
+    saveOtterReconciliationReviews: (reviews) => callIPC('imports:save-otter-reconciliation-reviews', reviews),
     previewOtter: () => callIPC('imports:preview-otter'),
     commitOtter: (archivePath, selectedKeys) => callIPC('imports:commit-otter', archivePath, selectedKeys)
   },

@@ -7,7 +7,7 @@ import { buildRecordingMeetingWindow } from './meeting-correlation'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 24
+const SCHEMA_VERSION = 25
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -472,6 +472,19 @@ CREATE TABLE IF NOT EXISTS device_review_queue (
     FOREIGN KEY (device_id) REFERENCES device_ingestion_state(device_id) ON DELETE CASCADE
 );
 
+-- Durable, non-destructive review decisions for Otter-to-HiDock reconciliation (v25)
+CREATE TABLE IF NOT EXISTS otter_reconciliation_reviews (
+    imported_recording_id TEXT PRIMARY KEY,
+    device_filename TEXT,
+    decision TEXT NOT NULL DEFAULT 'pending'
+      CHECK(decision IN ('pending', 'confirmed', 'separate')),
+    match_method TEXT
+      CHECK(match_method IS NULL OR match_method IN ('exact-timestamp', 'date-duration', 'adjacent-date-duration')),
+    reviewed_at TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (imported_recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+);
+
 -- Quality assessments for recordings (v10)
 CREATE TABLE IF NOT EXISTS quality_assessments (
     id TEXT PRIMARY KEY,
@@ -489,6 +502,7 @@ CREATE TABLE IF NOT EXISTS quality_assessments (
 CREATE INDEX IF NOT EXISTS idx_device_cache_filename ON device_files_cache(filename);
 CREATE INDEX IF NOT EXISTS idx_device_cache_date ON device_files_cache(date_recorded);
 CREATE INDEX IF NOT EXISTS idx_device_review_status ON device_review_queue(device_id, status, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_otter_reconciliation_decision ON otter_reconciliation_reviews(decision, updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_meetings_start_time ON meetings(start_time);
 CREATE INDEX IF NOT EXISTS idx_recordings_date ON recordings(date_recorded);
@@ -1307,6 +1321,27 @@ const MIGRATIONS: Record<number, () => void> = {
     database.run(
       "UPDATE recordings SET source_date_precision = 'exact' " +
       "WHERE source_date_precision IS NULL OR source_date_precision NOT IN ('exact', 'date-only', 'unknown')"
+    )
+  },
+  25: () => {
+    console.log('Running migration to schema v25: Adding durable Otter reconciliation reviews')
+    const database = getDatabase()
+    database.run(`
+      CREATE TABLE IF NOT EXISTS otter_reconciliation_reviews (
+        imported_recording_id TEXT PRIMARY KEY,
+        device_filename TEXT,
+        decision TEXT NOT NULL DEFAULT 'pending'
+          CHECK(decision IN ('pending', 'confirmed', 'separate')),
+        match_method TEXT
+          CHECK(match_method IS NULL OR match_method IN ('exact-timestamp', 'date-duration', 'adjacent-date-duration')),
+        reviewed_at TEXT,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (imported_recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+      )
+    `)
+    database.run(
+      'CREATE INDEX IF NOT EXISTS idx_otter_reconciliation_decision ' +
+      'ON otter_reconciliation_reviews(decision, updated_at DESC)'
     )
   }
 

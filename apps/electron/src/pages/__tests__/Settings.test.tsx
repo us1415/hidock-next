@@ -40,6 +40,7 @@ const mockPreviewOtter = vi.fn().mockResolvedValue({
   }
 })
 const mockCommitOtter = vi.fn()
+const mockSaveOtterReconciliationReviews = vi.fn().mockResolvedValue({ success: true, saved: 2 })
 const mockPreviewOtterReconciliation = vi.fn().mockResolvedValue({
   success: true,
   preview: {
@@ -59,15 +60,27 @@ const mockPreviewOtterReconciliation = vi.fn().mockResolvedValue({
       adjacentDateDurationMatches: 12,
       provisionalMatches: 379,
       unresolvedOverlapping: 22,
-      deviceWithoutOtterMatch: 250
+      deviceWithoutOtterMatch: 250,
+      reviewedConfirmed: 0,
+      reviewedSeparate: 0,
+      reviewPending: 401
     },
-    matches: [],
+    matches: [{
+      importedRecordingId: 'match-1',
+      importedFilename: 'Vendor planning.mp3',
+      deviceFilename: '2026Oct16-102913-Rec21.hda',
+      deviceRecordedAt: '2026-10-16T15:29:13.000Z',
+      method: 'exact-timestamp',
+      confidence: 1,
+      reviewDecision: 'pending'
+    }],
     unresolved: [{
       importedRecordingId: 'unresolved-1',
       importedFilename: 'Needs fingerprint.mp3',
       recordedDate: '2026-01-05',
       durationSeconds: 300,
-      nearestCandidates: []
+      nearestCandidates: [],
+      reviewDecision: 'pending'
     }]
   }
 })
@@ -126,7 +139,8 @@ global.window.electronAPI = {
   imports: {
     previewOtter: mockPreviewOtter,
     commitOtter: mockCommitOtter,
-    previewOtterReconciliation: mockPreviewOtterReconciliation
+    previewOtterReconciliation: mockPreviewOtterReconciliation,
+    saveOtterReconciliationReviews: mockSaveOtterReconciliationReviews
   },
   config: {
     get: vi.fn().mockResolvedValue({
@@ -278,8 +292,37 @@ describe('Settings Page', () => {
     await waitFor(() => expect(mockPreviewOtterReconciliation).toHaveBeenCalledOnce())
     expect(screen.getByText('629')).toBeInTheDocument()
     expect(screen.getByText('379')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Unresolved (1)' }))
     expect(screen.getByText(/Needs fingerprint\.mp3/)).toBeInTheDocument()
     expect(screen.getByText(/preview is read-only/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /merge/i })).not.toBeInTheDocument()
+  })
+
+  it('reviews and persistently saves a non-destructive reconciliation plan', async () => {
+    render(<Settings />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Preview HiDock Reconciliation' }))
+    await screen.findByText('Vendor planning.mp3')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm match' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save Review Plan' }))
+
+    await waitFor(() => expect(mockSaveOtterReconciliationReviews).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          importedRecordingId: 'match-1',
+          deviceFilename: '2026Oct16-102913-Rec21.hda',
+          decision: 'confirmed',
+          matchMethod: 'exact-timestamp'
+        }),
+        expect.objectContaining({
+          importedRecordingId: 'unresolved-1',
+          deviceFilename: null,
+          decision: 'pending',
+          matchMethod: null
+        })
+      ])
+    ))
     expect(screen.queryByRole('button', { name: /merge/i })).not.toBeInTheDocument()
   })
 
