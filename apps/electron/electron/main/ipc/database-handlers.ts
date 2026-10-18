@@ -19,10 +19,22 @@ import {
   addSyncedFile,
   removeSyncedFile,
   getSyncedFilenames,
+  getDeviceIngestionState,
+  getDeviceReviewItems,
+  observeDeviceInventory,
+  updateDeviceReviewStatus,
+  markDeviceSyncSuccess,
   updateRecordingStatus,
   updateRecordingTranscriptionStatus,
   linkRecordingToMeeting
 } from '../services/database'
+import {
+  DeviceIdSchema,
+  GetDeviceReviewItemsSchema,
+  MarkDeviceSyncSuccessSchema,
+  ObserveDeviceInventorySchema,
+  UpdateDeviceReviewStatusSchema
+} from './validation'
 
 export function registerDatabaseHandlers(): void {
   // Meetings
@@ -151,5 +163,31 @@ export function registerDatabaseHandlers(): void {
   ipcMain.handle('db:get-synced-filenames', async () => {
     const set = getSyncedFilenames()
     return Array.from(set)
+  })
+
+  // Per-device discovery baseline and opt-in review queue. None of these
+  // handlers downloads audio or starts transcription.
+  ipcMain.handle('deviceIngestion:getState', async (_, deviceId: unknown) => {
+    return getDeviceIngestionState(DeviceIdSchema.parse(deviceId)) ?? null
+  })
+
+  ipcMain.handle('deviceIngestion:observeInventory', async (_, input: unknown) => {
+    const parsed = ObserveDeviceInventorySchema.parse(input)
+    return observeDeviceInventory(parsed.deviceId, parsed.files)
+  })
+
+  ipcMain.handle('deviceIngestion:getReviewItems', async (_, input: unknown) => {
+    const parsed = GetDeviceReviewItemsSchema.parse(input)
+    return getDeviceReviewItems(parsed.deviceId, parsed.status)
+  })
+
+  ipcMain.handle('deviceIngestion:updateReviewStatus', async (_, input: unknown) => {
+    const parsed = UpdateDeviceReviewStatusSchema.parse(input)
+    return updateDeviceReviewStatus(parsed.deviceId, parsed.filename, parsed.status) ?? null
+  })
+
+  ipcMain.handle('deviceIngestion:markSyncSuccess', async (_, input: unknown) => {
+    const parsed = MarkDeviceSyncSuccessSchema.parse(input)
+    return markDeviceSyncSuccess(parsed.deviceId, parsed.latestSyncedRecordedAt) ?? null
   })
 }

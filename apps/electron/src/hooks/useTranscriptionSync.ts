@@ -20,17 +20,8 @@ export function useTranscriptionSync() {
 
     // Hydrate transcription queue from database on mount
     if (isElectron) {
-      window.electronAPI.recordings.getTranscriptionQueue().then((items: any[]) => {
-        const store = useTranscriptionStore.getState()
-        store.clear()
-        for (const item of items) {
-          if (item.status === 'pending' || item.status === 'processing') {
-            store.addToQueue(item.id, item.recording_id, item.filename || 'Unknown')
-            if (item.status === 'processing') {
-              store.updateProgress(item.id, item.progress ?? 0)
-            }
-          }
-        }
+      window.electronAPI.recordings.getTranscriptionQueue().then((items) => {
+        useTranscriptionStore.getState().replaceFromPersistence(items)
       }).catch(e => console.error('Failed to hydrate transcription queue:', e))
     }
 
@@ -68,7 +59,7 @@ export function useTranscriptionSync() {
           window.electronAPI.onTranscriptionCompleted((data) => {
             const store = useTranscriptionStore.getState()
             if (data.queueItemId) {
-              store.markCompleted(data.queueItemId, 'gemini')
+              store.markCompleted(data.queueItemId, data.provider || 'gemini')
             }
           })
         )
@@ -120,40 +111,7 @@ export function useTranscriptionSync() {
             const items = await window.electronAPI.recordings.getTranscriptionQueue()
             if (!items) return
 
-            const store = useTranscriptionStore.getState()
-            const currentIds = new Set<string>()
-
-            for (const item of items) {
-              currentIds.add(item.id)
-
-              if (item.status === 'completed') {
-                if (store.queue.has(item.id)) {
-                  store.markCompleted(item.id, item.provider || 'gemini')
-                }
-              } else if (item.status === 'failed') {
-                if (store.queue.has(item.id)) {
-                  store.markFailed(item.id, item.error_message || 'Unknown error')
-                }
-              } else if (item.status === 'processing') {
-                if (!store.queue.has(item.id)) {
-                  store.addToQueue(item.id, item.recording_id, item.filename || 'Unknown')
-                }
-                if (item.progress != null) {
-                  store.updateProgress(item.id, item.progress)
-                }
-              } else if (item.status === 'pending') {
-                if (!store.queue.has(item.id)) {
-                  store.addToQueue(item.id, item.recording_id, item.filename || 'Unknown')
-                }
-              }
-            }
-
-            // Remove items from store that are no longer in the DB queue
-            store.queue.forEach((_, id) => {
-              if (!currentIds.has(id)) {
-                store.remove(id)
-              }
-            })
+            useTranscriptionStore.getState().replaceFromPersistence(items)
           } catch {
             // Ignore polling errors
           }

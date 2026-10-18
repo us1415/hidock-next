@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, waitFor } from '@testing-library/react'
 import { useUnifiedRecordings } from '../useUnifiedRecordings'
 import { useAppStore } from '@/store/useAppStore'
+import { getHiDockDeviceService } from '@/services/hidock-device'
 
 // Mock dependencies
 vi.mock('@/services/hidock-device', () => ({
@@ -17,6 +18,10 @@ vi.mock('@/services/hidock-device', () => ({
 // Mock App Store
 vi.mock('@/store/useAppStore', () => ({
   useAppStore: vi.fn()
+}))
+
+vi.mock('@/services/qa-monitor', () => ({
+  shouldLogQa: vi.fn(() => false)
 }))
 
 // Mock toaster to avoid circular dependency issues
@@ -112,6 +117,64 @@ describe('useUnifiedRecordings', () => {
         expect(storeState.decrementUnifiedRecordingsLoading).toHaveBeenCalled()
       })
     })
+
+    it('keeps diagnostic logging quiet when QA logs are disabled', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+      try {
+        renderHook(() => useUnifiedRecordings())
+
+        await waitFor(() => {
+          expect(storeState.markUnifiedRecordingsLoaded).toHaveBeenCalled()
+        })
+        expect(logSpy).not.toHaveBeenCalled()
+      } finally {
+        logSpy.mockRestore()
+      }
+    })
+
+    it('preserves dismissed review status after observing a connected device inventory', async () => {
+      const deviceRecording = {
+        id: 'device-1',
+        filename: '2026Oct18-090000-Rec24.hda',
+        size: 12000,
+        duration: 1,
+        dateCreated: new Date('2026-10-18T09:00:00')
+      }
+      vi.mocked(getHiDockDeviceService).mockReturnValueOnce({
+        isConnected: vi.fn(() => true),
+        getState: vi.fn(() => ({ connected: true, serialNumber: 'P1-test', model: 'hidock-p1' })),
+        onConnectionChange: vi.fn(() => () => {}),
+        onStatusChange: vi.fn(() => () => {}),
+        getCachedRecordings: vi.fn(() => [deviceRecording]),
+        listRecordings: vi.fn(() => [deviceRecording])
+      } as any)
+      const dismissedItem = {
+        filename: deviceRecording.filename,
+        status: 'dismissed' as const
+      }
+      window.electronAPI.deviceIngestion = {
+        getReviewItems: vi.fn().mockResolvedValue([dismissedItem]),
+        observeInventory: vi.fn().mockResolvedValue({
+          baselineInitialized: false,
+          newItems: [],
+          pendingItems: [],
+          state: {}
+        })
+      } as any
+
+      renderHook(() => useUnifiedRecordings())
+
+      await waitFor(() => {
+        expect(storeState.setUnifiedRecordings).toHaveBeenCalledWith(expect.arrayContaining([
+          expect.objectContaining({
+            filename: deviceRecording.filename,
+            reviewStatus: 'dismissed',
+            deviceId: 'hidock:P1-test'
+          })
+        ]))
+      })
+    })
   })
 
   // ============================================================
@@ -179,6 +242,33 @@ describe('useUnifiedRecordings', () => {
         }
       })
     })
+
+    it('prefers the authoritative transcription status for local-only recordings', async () => {
+      const mockRecs = [{
+        id: 'rec_2026Oct16_102913_Rec21_mp3',
+        filename: '2026Oct16-102913-Rec21.mp3',
+        file_path: '/recordings/2026Oct16-102913-Rec21.mp3',
+        file_size: 730894000,
+        status: 'pending',
+        transcription_status: 'complete',
+        date_recorded: '2026-10-16T10:29:13Z'
+      }]
+
+      // @ts-ignore
+      window.electronAPI.recordings.getAll.mockResolvedValue(mockRecs)
+
+      renderHook(() => useUnifiedRecordings())
+
+      await waitFor(() => {
+        expect(storeState.setUnifiedRecordings).toHaveBeenCalledWith(expect.arrayContaining([
+          expect.objectContaining({
+            id: 'rec_2026Oct16_102913_Rec21_mp3',
+            location: 'local-only',
+            transcriptionStatus: 'complete'
+          })
+        ]))
+      })
+    })
   })
 
   // ============================================================
@@ -200,6 +290,7 @@ describe('useUnifiedRecordings', () => {
         unsynced: 0,
         onSource: 0,
         locallyAvailable: 0,
+        reviewNew: 0,
       })
     })
 

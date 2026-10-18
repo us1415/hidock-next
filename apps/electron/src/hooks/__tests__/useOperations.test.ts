@@ -43,6 +43,7 @@ const mockCancelTranscription = vi.fn().mockResolvedValue(undefined)
 const mockCancelAllTranscriptions = vi.fn().mockResolvedValue({ count: 3 })
 const mockQueueDownloads = vi.fn().mockResolvedValue(undefined)
 const mockCancelAllDownloads = vi.fn().mockResolvedValue(undefined)
+const mockUpdateReviewStatus = vi.fn().mockResolvedValue({ status: 'approved' })
 
 const mockAddToQueueIPC = vi.fn().mockResolvedValue('queue-item-1')
 
@@ -56,6 +57,9 @@ global.window.electronAPI = {
   downloadService: {
     queueDownloads: mockQueueDownloads,
     cancelAll: mockCancelAllDownloads
+  },
+  deviceIngestion: {
+    updateReviewStatus: mockUpdateReviewStatus
   },
   config: {
     getValue: vi.fn().mockResolvedValue({ success: true, data: 'test-api-key' })
@@ -193,6 +197,33 @@ describe('useOperations', () => {
         size: 2048,
         dateCreated: expect.any(String)
       }])
+    })
+
+    it('marks a newly reviewed device recording approved after explicit download', async () => {
+      const { result } = renderHook(() => useOperations())
+      const deviceOnly = {
+        id: 'rec-new',
+        filename: '2026Oct18-120000-Rec24.hda',
+        location: 'device-only' as const,
+        deviceFilename: '2026Oct18-120000-Rec24.hda',
+        syncStatus: 'not-synced' as const,
+        transcriptionStatus: 'none' as const,
+        reviewStatus: 'new' as const,
+        deviceId: 'hidock:P1-TEST-001',
+        size: 2048,
+        duration: 120,
+        dateRecorded: new Date('2026-10-18T17:00:00.000Z')
+      }
+
+      await act(async () => {
+        await result.current.queueDownload(deviceOnly as any)
+      })
+
+      expect(mockUpdateReviewStatus).toHaveBeenCalledWith({
+        deviceId: 'hidock:P1-TEST-001',
+        filename: '2026Oct18-120000-Rec24.hda',
+        status: 'approved'
+      })
     })
   })
 

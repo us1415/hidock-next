@@ -35,13 +35,17 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
 
     // Load initial state
     window.electronAPI.downloadService.getState().then((state) => {
-      const failedCount = state?.queue?.filter((item: { status: string }) => item.status === 'failed').length ?? 0
+      const failedCount = state?.queue?.filter(
+        (item: { status: string }) => item.status === 'failed' || item.status === 'cancelled'
+      ).length ?? 0
       setFailedDownloadCount(failedCount)
     }).catch(() => {})
 
     // Subscribe to updates
     const unsub = window.electronAPI.downloadService.onStateUpdate((state: { queue: Array<{ status: string }> }) => {
-      const failedCount = state.queue.filter((item) => item.status === 'failed').length
+      const failedCount = state.queue.filter(
+        (item) => item.status === 'failed' || item.status === 'cancelled'
+      ).length
       setFailedDownloadCount(failedCount)
     })
     return unsub

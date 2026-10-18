@@ -103,13 +103,14 @@ export async function saveRecording(
   // Validate input filename to prevent any path traversal in the source
   validateFilename(baseFilename)
 
-  // Preserve the original device filename, just change .hda to .wav
-  // Device format: 2025Dec15-100105-Rec22.hda -> 2025Dec15-100105-Rec22.wav
+  // HiDock .hda recordings contain MP3 data. Preserve the bytes and give the
+  // local file its real extension so media players and transcription APIs do
+  // not attempt to decode MP3 frames as WAV.
   let cleanFilename = baseFilename
   const ext = extname(baseFilename).toLowerCase()
   const isHdaFile = ext === '.hda'
   if (isHdaFile) {
-    cleanFilename = baseFilename.slice(0, -4) + '.wav'
+    cleanFilename = baseFilename.slice(0, -4) + '.mp3'
   }
 
   // Validate the final path stays within recordings directory

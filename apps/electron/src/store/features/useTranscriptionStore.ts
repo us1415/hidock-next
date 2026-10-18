@@ -26,6 +26,20 @@ export interface TranscriptionItem {
   provider?: string // 'gemini', etc.
 }
 
+export interface PersistedTranscriptionItem {
+  id: string
+  recording_id: string
+  filename?: string
+  status: string
+  progress?: number | null
+  error_message?: string | null
+  retry_count?: number | null
+  attempts?: number | null
+  started_at?: string | null
+  completed_at?: string | null
+  provider?: string
+}
+
 export interface TranscriptionQueueStore {
   // State
   queue: Map<string, TranscriptionItem>
@@ -38,6 +52,7 @@ export interface TranscriptionQueueStore {
   markCompleted: (id: string, provider: string) => void
   markFailed: (id: string, error: string) => void
   retry: (id: string) => void
+  replaceFromPersistence: (items: PersistedTranscriptionItem[]) => void
   remove: (id: string) => void
   clear: () => void
 
@@ -177,6 +192,34 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
       }).catch((e) => {
         console.error('Failed to update queue item in DB for retry:', e)
       })
+    },
+
+    replaceFromPersistence: (items) => {
+      const queue = new Map<string, TranscriptionItem>()
+      const processing = new Set<string>()
+
+      for (const item of items) {
+        if (item.status !== 'pending' && item.status !== 'processing' && item.status !== 'failed') continue
+
+        const status = item.status as TranscriptionStatus
+        queue.set(item.id, {
+          id: item.id,
+          recordingId: item.recording_id,
+          filename: item.filename || 'Unknown',
+          status,
+          progress: Number.isFinite(item.progress) ? Math.max(0, Math.min(100, item.progress!)) : 0,
+          error: item.error_message || undefined,
+          retryCount: item.retry_count ?? 0,
+          attempts: item.attempts ?? 0,
+          startedAt: item.started_at ? new Date(item.started_at) : undefined,
+          completedAt: item.completed_at ? new Date(item.completed_at) : undefined,
+          provider: item.provider
+        })
+
+        if (status === 'processing') processing.add(item.recording_id)
+      }
+
+      set({ queue, processing })
     },
 
     remove: (id) => {

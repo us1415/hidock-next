@@ -3,6 +3,7 @@ import { join, extname, basename } from 'path'
 import { getRecordingsPath } from './file-storage'
 import {
   getRecordingById,
+  getRecordingByFilePath,
   insertRecording,
   getMeetings,
   linkRecordingToMeeting,
@@ -92,7 +93,7 @@ async function scanExistingRecordings(): Promise<void> {
     const recordingId = generateRecordingId(filePath)
 
     // Check if already in database
-    const existing = getRecordingById(recordingId)
+    const existing = getRecordingById(recordingId) || getRecordingByFilePath(filePath)
     if (!existing) {
       filesToProcess.push(filePath)
     }
@@ -135,7 +136,7 @@ async function processNewRecording(filePath: string): Promise<void> {
 
     // Check if already in database (by ID or filename)
     // This prevents duplicates when files are downloaded (which have UUIDs) vs external files
-    let existing = getRecordingById(recordingId)
+    let existing = getRecordingById(recordingId) || getRecordingByFilePath(filePath)
     
     // If not found by generated ID, check by filename (how device files are stored)
     if (!existing) {
@@ -169,15 +170,18 @@ async function processNewRecording(filePath: string): Promise<void> {
     // Parse date from filename if possible (format: YYYY-MM-DD_HHMM-description.ext)
     const dateMatch = filename.match(/^(\d{4}-\d{2}-\d{2})_(\d{4})/)
     let dateRecorded: string
+    let sourceDateEvidence: 'filename-timestamp' | 'filesystem-mtime'
 
     if (dateMatch) {
       const [, date, time] = dateMatch
       const hours = time.slice(0, 2)
       const minutes = time.slice(2, 4)
       dateRecorded = `${date}T${hours}:${minutes}:00`
+      sourceDateEvidence = 'filename-timestamp'
     } else {
       // Use file modification time
       dateRecorded = stats.mtime.toISOString()
+      sourceDateEvidence = 'filesystem-mtime'
     }
 
     // Insert recording into database
@@ -189,6 +193,8 @@ async function processNewRecording(filePath: string): Promise<void> {
       file_size: stats.size,
       duration_seconds: undefined, // Will be updated after processing
       date_recorded: dateRecorded,
+      source_date_precision: 'exact',
+      source_date_evidence: sourceDateEvidence,
       meeting_id: undefined,
       correlation_confidence: undefined,
       correlation_method: undefined,

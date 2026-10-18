@@ -303,9 +303,12 @@ export interface AppConfig {
     lastSyncAt: string | null
   }
   transcription: {
-    provider: 'gemini'
+    provider: 'gemini' | 'openai'
     geminiApiKey: string
     geminiModel: string
+    openaiApiKey: string
+    openaiTranscriptionModel: string
+    openaiAnalysisModel: string
     autoTranscribe: boolean
     language: string
   }

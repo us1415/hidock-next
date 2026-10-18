@@ -31,7 +31,8 @@ interface SourceBase {
   id: string
   type: SourceType
   title: string
-  capturedAt: string // ISO 8601
+  capturedAt: string | null // ISO 8601 source timestamp; null means unknown
+  capturedAtPrecision?: 'exact' | 'date-only' | 'unknown'
   location: SourceLocation
   processingStatus: ProcessingStatus
 

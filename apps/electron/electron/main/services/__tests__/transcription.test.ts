@@ -38,6 +38,8 @@ vi.mock('../database', () => ({
   acquireTranscriptionLock: vi.fn().mockReturnValue(true),
   releaseTranscriptionLock: vi.fn().mockReturnValue(true),
   clearStaleTranscriptionLock: vi.fn(), // Called on startTranscriptionProcessor()
+  startTranscriptionHistory: vi.fn(() => 'history-1'),
+  finishTranscriptionHistory: vi.fn(),
   run: vi.fn(),
   queryOne: vi.fn()
 }))
@@ -54,8 +56,12 @@ vi.mock('electron', () => ({
 vi.mock('../config', () => ({
   getConfig: vi.fn(() => ({
     transcription: {
+      provider: 'gemini',
       geminiApiKey: 'test-api-key',
-      geminiModel: 'gemini-2.0-flash'
+      geminiModel: 'gemini-2.0-flash',
+      openaiApiKey: '',
+      openaiTranscriptionModel: 'gpt-transcribe',
+      openaiAnalysisModel: 'gpt-6-luna'
     }
   }))
 }))

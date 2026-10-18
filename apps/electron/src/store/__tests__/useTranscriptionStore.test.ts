@@ -101,6 +101,75 @@ describe('useTranscriptionStore', () => {
     })
   })
 
+  describe('replaceFromPersistence', () => {
+    it('restores failed items with retry metadata after restart', () => {
+      useTranscriptionStore.getState().replaceFromPersistence([{
+        id: 'q-failed',
+        recording_id: 'rec-1',
+        filename: 'meeting.mp3',
+        status: 'failed',
+        progress: 42,
+        error_message: 'Temporary provider error',
+        retry_count: 2,
+        attempts: 3,
+        started_at: '2026-10-18T10:00:00.000Z',
+        completed_at: '2026-10-18T10:01:00.000Z'
+      }])
+
+      const item = useTranscriptionStore.getState().queue.get('q-failed')
+      expect(item).toMatchObject({
+        recordingId: 'rec-1',
+        filename: 'meeting.mp3',
+        status: 'failed',
+        progress: 42,
+        error: 'Temporary provider error',
+        retryCount: 2,
+        attempts: 3
+      })
+      expect(item?.startedAt).toEqual(new Date('2026-10-18T10:00:00.000Z'))
+      expect(item?.completedAt).toEqual(new Date('2026-10-18T10:01:00.000Z'))
+    })
+
+    it('restores processing membership and omits completed history', () => {
+      useTranscriptionStore.getState().replaceFromPersistence([
+        {
+          id: 'q-processing',
+          recording_id: 'rec-processing',
+          filename: 'active.mp3',
+          status: 'processing',
+          progress: 64
+        },
+        {
+          id: 'q-completed',
+          recording_id: 'rec-completed',
+          filename: 'done.mp3',
+          status: 'completed',
+          progress: 100
+        }
+      ])
+
+      const state = useTranscriptionStore.getState()
+      expect(state.queue.has('q-processing')).toBe(true)
+      expect(state.processing.has('rec-processing')).toBe(true)
+      expect(state.queue.has('q-completed')).toBe(false)
+    })
+
+    it('replaces stale renderer state with the database snapshot', () => {
+      useTranscriptionStore.getState().addToQueue('stale', 'rec-stale', 'stale.mp3')
+
+      useTranscriptionStore.getState().replaceFromPersistence([{
+        id: 'current',
+        recording_id: 'rec-current',
+        filename: 'current.mp3',
+        status: 'pending'
+      }])
+
+      const queue = useTranscriptionStore.getState().queue
+      expect(queue.has('stale')).toBe(false)
+      expect(queue.has('current')).toBe(true)
+    })
+  })
+
   describe('updateProgress', () => {
     it('updates progress and sets status to processing', () => {
       const { addToQueue, updateProgress } = useTranscriptionStore.getState()

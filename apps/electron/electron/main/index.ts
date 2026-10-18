@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, session, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, session, ipcMain, dialog } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
@@ -18,8 +18,9 @@ const USB_PRODUCT_IDS = [
   0x2041   // P1 Mini (alternate)
 ]
 import { initializeDatabase, closeDatabase } from './services/database'
-import { initializeConfig } from './services/config'
+import { getDataPath, initializeConfig } from './services/config'
 import { initializeFileStorage } from './services/file-storage'
+import { applyPendingPortableRestore, PortableRestoreRollbackError } from './services/portable-backup'
 import { registerIpcHandlers } from './ipc/handlers'
 import { stopAutoSync, initializeCalendarAutoSync } from './ipc/calendar-handlers'
 import {
@@ -135,6 +136,24 @@ async function initializeServices(): Promise<void> {
   updateSplashStatus('Setting up storage...', 20)
   await initializeFileStorage()
   console.log('File storage initialized')
+
+  updateSplashStatus('Checking for a pending restore...', 25)
+  try {
+    const restore = await applyPendingPortableRestore(getDataPath())
+    if (restore.applied) {
+      console.log(`Portable backup restored (${restore.restoredFiles || 0} files).`)
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'The backup could not be restored.'
+    console.error('Portable backup restore failed:', error)
+    dialog.showErrorBox(
+      'HiDock Next restore failed',
+      error instanceof PortableRestoreRollbackError
+        ? `${message}\n\nStartup stopped because the previous library could not be restored safely.`
+        : `${message}\n\nThe current library was kept unchanged. The failed restore was quarantined.`
+    )
+    if (error instanceof PortableRestoreRollbackError) throw error
+  }
 
   updateSplashStatus('Initializing database...', 30)
   await initializeDatabase()

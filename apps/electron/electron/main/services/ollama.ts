@@ -3,6 +3,8 @@
  * Handles embedding generation and LLM inference via local Ollama instance
  */
 
+import { getConfig } from './config'
+
 // AI-07 FIX: These are now fallback defaults only - actual values come from config
 const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434'
 const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text'
@@ -192,8 +194,9 @@ let ollamaInstance: OllamaService | null = null
 export function getOllamaService(): OllamaService {
   if (!ollamaInstance) {
     try {
-      // AI-07 FIX: Read config values properly from the config service
-      const { getConfig } = require('./config')
+      // Use a static import so electron-vite includes the config service in the
+      // bundled main process. A runtime require('./config') points at a module
+      // that does not exist beside out/main/index.js after bundling.
       const config = getConfig()
 
       // Read from correct config paths (embeddings.ollamaBaseUrl, embeddings.ollamaModel, chat.ollamaModel)

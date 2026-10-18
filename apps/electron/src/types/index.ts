@@ -29,6 +29,7 @@
 
 export * from './stores'
 export type { Actionable } from './knowledge'
+import type { Actionable } from './knowledge'
 
 // =============================================================================
 // Existing Types
@@ -65,6 +66,8 @@ export interface Recording {
   file_size: number | null
   duration_seconds: number | null
   date_recorded: string
+  source_date_precision?: 'exact' | 'date-only' | 'unknown'
+  source_date_evidence?: string | null
   meeting_id: string | null
   correlation_confidence: number | null
   correlation_method: string | null
@@ -160,9 +163,12 @@ export interface AppConfig {
   }
   calendar: CalendarSettings
   transcription: {
-    provider: 'gemini'
+    provider: 'gemini' | 'openai'
     geminiApiKey: string
     geminiModel: string
+    openaiApiKey: string
+    openaiTranscriptionModel: string
+    openaiAnalysisModel: string
     autoTranscribe: boolean
     language: string
   }

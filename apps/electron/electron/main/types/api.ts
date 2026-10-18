@@ -138,6 +138,7 @@ export interface RAGSource {
  */
 export interface GetContactsRequest {
   search?: string
+  type?: 'team' | 'candidate' | 'customer' | 'external' | 'unknown' | 'all'
   limit?: number
   offset?: number
 }
@@ -214,7 +215,7 @@ export interface CreateProjectRequest {
 export interface UpdateProjectRequest {
   id: string
   name?: string
-  description?: string
+  description?: string | null
   status?: 'active' | 'archived'
 }
 
