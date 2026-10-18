@@ -18,6 +18,9 @@ import { cancelDownloads } from '@/hooks/useDownloadOrchestrator'
 import { formatEta, formatBytes } from '@/utils/formatters'
 import { DeviceFileList } from '@/components/DeviceFileList'
 import { shouldLogQa } from '@/services/qa-monitor'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { getOpenAITranscriptionPricingSummary } from '@/utils/transcriptionPricing'
+import { useConfigStore } from '@/store/domain/useConfigStore'
 
 const CONNECTION_TIMEOUT_MS = 10000 // 10 second timeout (BUG-006)
 
@@ -30,6 +33,7 @@ export function Device() {
   const setDeviceSyncState = useAppStore(state => state.setDeviceSyncState)
   const deviceSyncProgress = useAppStore(state => state.deviceSyncProgress)
   const deviceSyncEta = useAppStore(state => state.deviceSyncEta)
+  const updateConfig = useConfigStore(state => state.updateConfig)
 
   // Initialize service
   const deviceService = getHiDockDeviceService()
@@ -69,11 +73,13 @@ export function Device() {
   const [autoConnectConfig, setAutoConnectConfig] = useState(() => deviceService.getAutoConnectConfig())
 
   // Auto-download and auto-transcribe configuration state
-  // C-004: Default to true (matching config.ts defaults) so switches show the correct
-  // state while config loads async. The `null` sentinel caused the switch to show "off"
-  // even though the actual default is true, creating a confusing initial flash.
-  const [autoDownload, setAutoDownload] = useState<boolean | null>(true)
-  const [autoTranscribe, setAutoTranscribe] = useState<boolean | null>(true)
+  // Destructive/cost-incurring automation is opt-in. Keep the switches off until
+  // the persisted configuration has loaded so a first device connection cannot
+  // accidentally download and transcribe an entire historical archive.
+  const [autoDownload, setAutoDownload] = useState<boolean | null>(false)
+  const [autoTranscribe, setAutoTranscribe] = useState<boolean | null>(false)
+  const [openaiTranscriptionModel, setOpenaiTranscriptionModel] = useState('gpt-transcribe')
+  const [pendingAutomationToggle, setPendingAutomationToggle] = useState<'download' | 'transcribe' | null>(null)
 
   // B-DEV-005: Loading state for device config switches
   const [configLoading, setConfigLoading] = useState<Record<string, boolean>>({})
@@ -178,6 +184,9 @@ export function Device() {
           }
           if (config?.transcription?.autoTranscribe !== undefined) {
             setAutoTranscribe(config.transcription.autoTranscribe)
+          }
+          if (config?.transcription?.openaiTranscriptionModel) {
+            setOpenaiTranscriptionModel(config.transcription.openaiTranscriptionModel)
           }
         }
       } catch (e) {
@@ -476,10 +485,15 @@ export function Device() {
       }
 
       if (toSync.length === 0) {
+        const unknownDateCount = filesWithStatus.filter(
+          (file) => file.skipReason === 'Original recording date is unknown; review required'
+        ).length
         toast({
-          title: 'All synced',
-          description: 'All recordings are already downloaded',
-          variant: 'success'
+          title: unknownDateCount > 0 ? 'Recording dates need review' : 'All synced',
+          description: unknownDateCount > 0
+            ? `${unknownDateCount} recording${unknownDateCount > 1 ? 's have' : ' has'} no trustworthy source date and was not downloaded.`
+            : 'All recordings are already downloaded',
+          variant: unknownDateCount > 0 ? 'error' : 'success'
         })
         setDeviceSyncState({ deviceSyncing: false })
         return
@@ -560,9 +574,17 @@ export function Device() {
   }
 
   const handleAutoDownloadToggle = async (enabled: boolean) => {
+    if (enabled) {
+      setPendingAutomationToggle('download')
+      return
+    }
+    await applyAutoDownloadSetting(false)
+  }
+
+  const applyAutoDownloadSetting = async (enabled: boolean) => {
     setConfigLoading(prev => ({ ...prev, autoDownload: true }))
     try {
-      await window.electronAPI.config.updateSection('device', { autoDownload: enabled })
+      await updateConfig('device', { autoDownload: enabled })
       setAutoDownload(enabled)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to update auto-download setting')
@@ -572,9 +594,17 @@ export function Device() {
   }
 
   const handleAutoTranscribeToggle = async (enabled: boolean) => {
+    if (enabled) {
+      setPendingAutomationToggle('transcribe')
+      return
+    }
+    await applyAutoTranscribeSetting(false)
+  }
+
+  const applyAutoTranscribeSetting = async (enabled: boolean) => {
     setConfigLoading(prev => ({ ...prev, autoTranscribe: true }))
     try {
-      await window.electronAPI.config.updateSection('transcription', { autoTranscribe: enabled })
+      await updateConfig('transcription', { autoTranscribe: enabled })
       setAutoTranscribe(enabled)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to update auto-transcribe setting')
@@ -582,6 +612,8 @@ export function Device() {
       setConfigLoading(prev => ({ ...prev, autoTranscribe: false }))
     }
   }
+
+  const transcriptionPricing = getOpenAITranscriptionPricingSummary(openaiTranscriptionModel)
 
   // DV-02: Format Storage handler with confirmation
   const [formatting, setFormatting] = useState(false)
@@ -884,6 +916,9 @@ export function Device() {
                             onCheckedChange={handleAutoDownloadToggle}
                           />
                         </div>
+                        <p className="text-xs text-muted-foreground text-center">
+                          Opt-in. Only newly detected recordings awaiting review are eligible; the first scan creates a baseline and downloads nothing.
+                        </p>
                         <div className="flex items-center justify-center gap-3">
                           <Label htmlFor="auto-transcribe-disconnected" className="text-sm text-muted-foreground">
                             Auto-transcribe recordings
@@ -895,6 +930,11 @@ export function Device() {
                             onCheckedChange={handleAutoTranscribeToggle}
                           />
                         </div>
+                        <p className="text-xs text-muted-foreground text-center">
+                          Paid API usage for each new local recording.
+                          {transcriptionPricing ? ` Estimated audio cost: ${transcriptionPricing}.` : ''}
+                          {' '}Transcript analysis is billed separately.
+                        </p>
                       </div>
                     </>
                   )}
@@ -1033,6 +1073,9 @@ export function Device() {
                         onCheckedChange={handleAutoDownloadToggle}
                       />
                     </div>
+                    <p className="text-[11px] text-muted-foreground mb-3">
+                      Opt-in. Only newly detected recordings awaiting review are eligible; the first scan creates a baseline and downloads nothing.
+                    </p>
                     <div className="flex items-center justify-between">
                       <Label htmlFor="auto-transcribe" className="text-sm flex items-center gap-2">
                         Auto-transcribe recordings
@@ -1045,6 +1088,11 @@ export function Device() {
                         onCheckedChange={handleAutoTranscribeToggle}
                       />
                     </div>
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Paid API usage for each new local recording.
+                      {transcriptionPricing ? ` Estimated audio cost: ${transcriptionPricing}.` : ''}
+                      {' '}Transcript analysis is billed separately.
+                    </p>
 
                     {/* DV-02: Format Storage button */}
                     <div className="mt-3 pt-3 border-t">
@@ -1493,6 +1541,29 @@ export function Device() {
               </CardContent>
             </Card>
           )}
+
+          <ConfirmDialog
+            open={pendingAutomationToggle !== null}
+            onOpenChange={(open) => {
+              if (!open) setPendingAutomationToggle(null)
+            }}
+            title={pendingAutomationToggle === 'transcribe'
+              ? 'Enable paid automatic transcription?'
+              : 'Enable automatic download?'}
+            description={pendingAutomationToggle === 'transcribe'
+              ? `New local recordings will be sent to the configured AI provider automatically. ${transcriptionPricing ? `Estimated OpenAI audio cost: ${transcriptionPricing}. ` : ''}Transcript analysis is billed separately and actual cost can vary. No existing recording is queued by changing this setting.`
+              : 'When this device connects, only newly detected recordings still in the Review queue will be downloaded. The first inventory scan establishes a baseline and downloads nothing. Transcription remains a separate setting.'}
+            actionLabel={pendingAutomationToggle === 'transcribe'
+              ? 'Enable Paid Transcription'
+              : 'Enable Auto-download'}
+            variant="default"
+            onConfirm={() => {
+              const pending = pendingAutomationToggle
+              setPendingAutomationToggle(null)
+              if (pending === 'transcribe') void applyAutoTranscribeSetting(true)
+              if (pending === 'download') void applyAutoDownloadSetting(true)
+            }}
+          />
         </div>
       </div>
     </div>

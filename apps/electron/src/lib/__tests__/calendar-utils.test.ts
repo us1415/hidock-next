@@ -222,6 +222,18 @@ describe('matchRecordingsToMeetings', () => {
     expect(orphanRecordings[0].id).toBe('r1')
   })
 
+  it('does not auto-match a date-only recording by its synthetic Date value', () => {
+    const meetings = [makeMeetingEntity('m1', 'Midnight Meeting', 0, 1)]
+    const recording = makeUnifiedRecording('r1', 0, 30)
+    recording.sourceDatePrecision = 'date-only'
+    recording.sourceDateValue = '2026-03-02'
+
+    const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings(meetings, [recording])
+
+    expect(calendarMeetings[0].hasRecording).toBe(false)
+    expect(orphanRecordings).toEqual([recording])
+  })
+
   it('should handle meetings with no recordings', () => {
     const meetings = [
       makeMeetingEntity('m1', 'Standup', 9, 10),
@@ -296,6 +308,14 @@ describe('createPlaceholderMeetings', () => {
     expect(placeholders[0].isPlaceholder).toBe(true)
     expect(placeholders[0].hasRecording).toBe(true)
     expect(placeholders[0].matchedRecordingId).toBe('r1')
+  })
+
+  it('does not create a midnight placeholder for a date-only recording', () => {
+    const recording = makeUnifiedRecording('r1', 0, 30)
+    recording.sourceDatePrecision = 'date-only'
+    recording.sourceDateValue = '2026-03-02'
+
+    expect(createPlaceholderMeetings([recording])).toEqual([])
   })
 })
 

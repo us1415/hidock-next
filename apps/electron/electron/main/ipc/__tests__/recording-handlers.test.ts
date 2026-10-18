@@ -3,23 +3,32 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { ipcMain } from 'electron'
-import { registerRecordingHandlers } from '../recording-handlers'
+import { dialog, ipcMain } from 'electron'
+import { mkdirSync, utimesSync, writeFileSync } from 'fs'
+import { buildTranscriptExportContent, registerRecordingHandlers } from '../recording-handlers'
+
+const pdfMocks = vi.hoisted(() => ({
+  createTranscriptPdfBuffer: vi.fn()
+}))
 
 // Mock electron
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
-  dialog: { showOpenDialog: vi.fn() },
+  dialog: { showOpenDialog: vi.fn(), showSaveDialog: vi.fn() },
   BrowserWindow: {
+    fromWebContents: vi.fn(() => ({})),
     getFocusedWindow: vi.fn(),
     getAllWindows: vi.fn(() => [{}])
   }
 }))
 
+vi.mock('../../services/transcript-pdf', () => pdfMocks)
+
 // Mock database service
 vi.mock('../../services/database', () => ({
   getRecordings: vi.fn(),
   getRecordingById: vi.fn(),
+  resolveRecordingId: vi.fn((id: string) => id),
   getRecordingsForMeeting: vi.fn(),
   updateRecordingStatus: vi.fn(),
   updateRecordingTranscriptionStatus: vi.fn(),
@@ -30,7 +39,8 @@ vi.mock('../../services/database', () => ({
   insertRecording: vi.fn(),
   getQueueItems: vi.fn(),
   addToQueue: vi.fn(),
-  updateQueueItem: vi.fn()
+  updateQueueItem: vi.fn(),
+  getTranscriptionHistory: vi.fn()
 }))
 
 // Mock file-storage service
@@ -48,7 +58,10 @@ vi.mock('fs', async () => {
     ...actual,
     copyFileSync: vi.fn(),
     existsSync: vi.fn(),
-    statSync: vi.fn()
+    statSync: vi.fn(),
+    mkdirSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    utimesSync: vi.fn()
   }
 })
 
@@ -159,6 +172,8 @@ describe('Recording IPC Handlers', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks()
+    const { resolveRecordingId } = await import('../../services/database')
+    vi.mocked(resolveRecordingId).mockImplementation((id: string) => id)
     handlers = {}
     vi.mocked(ipcMain.handle).mockImplementation((channel: string, handler: Function) => {
       handlers[channel] = handler
@@ -171,6 +186,7 @@ describe('Recording IPC Handlers', () => {
     const expectedChannels = [
       'recordings:getAll',
       'recordings:getById',
+      'recordings:getTranscriptionHistory',
       'recordings:getForMeeting',
       'recordings:getAllWithTranscripts',
       'recordings:delete',
@@ -178,6 +194,7 @@ describe('Recording IPC Handlers', () => {
       'recordings:linkToMeeting',
       'recordings:unlinkFromMeeting',
       'recordings:getTranscript',
+      'transcripts:export',
       'recordings:transcribe',
       'recordings:getWatcherStatus',
       'recordings:startWatcher',
@@ -264,6 +281,27 @@ describe('Recording IPC Handlers', () => {
       const result = await handlers['recordings:getById'](null, '550e8400-e29b-41d4-a716-446655440000')
 
       expect(result).toBeUndefined()
+    })
+  })
+
+  describe('recordings:getTranscriptionHistory', () => {
+    it('resolves a synced ID and returns durable processing history', async () => {
+      const { getTranscriptionHistory, resolveRecordingId } = await import('../../services/database')
+      const syncedId = '550e8400-e29b-41d4-a716-446655440000'
+      const canonicalId = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'
+      const history = [{ id: 'history-1', recording_id: canonicalId, status: 'completed' }]
+      vi.mocked(resolveRecordingId).mockReturnValue(canonicalId)
+      vi.mocked(getTranscriptionHistory).mockReturnValue(history as any)
+
+      const result = await handlers['recordings:getTranscriptionHistory'](null, syncedId)
+
+      expect(getTranscriptionHistory).toHaveBeenCalledWith(canonicalId)
+      expect(result).toEqual(history)
+    })
+
+    it('returns an empty history for an invalid ID', async () => {
+      const result = await handlers['recordings:getTranscriptionHistory'](null, 'invalid')
+      expect(result).toEqual([])
     })
   })
 
@@ -391,7 +429,7 @@ describe('Recording IPC Handlers', () => {
 
   describe('recordings:deleteBatch', () => {
     it('should delete multiple recordings and return results', async () => {
-      const { getRecordingById, updateRecordingStatus } = await import('../../services/database')
+      const { getRecordingById } = await import('../../services/database')
       const { deleteRecording } = await import('../../services/file-storage')
 
       const id1 = '550e8400-e29b-41d4-a716-446655440000'
@@ -411,7 +449,7 @@ describe('Recording IPC Handlers', () => {
     })
 
     it('should return partial results when some deletions fail', async () => {
-      const { getRecordingById, updateRecordingStatus } = await import('../../services/database')
+      const { getRecordingById } = await import('../../services/database')
       const { deleteRecording } = await import('../../services/file-storage')
 
       const id1 = '550e8400-e29b-41d4-a716-446655440000'
@@ -518,6 +556,134 @@ describe('Recording IPC Handlers', () => {
       const result = await handlers['recordings:getTranscript'](null, 'invalid')
 
       expect(result).toBeUndefined()
+    })
+  })
+
+  describe('transcripts:export', () => {
+    const recording = {
+      id: 'canonical-rec-id',
+      filename: '2026Oct16-102913-Rec21.mp3',
+      original_filename: '2026Oct16-102913-Rec21.hda',
+      date_recorded: '2026-10-16T15:29:13.000Z'
+    }
+    const transcript = {
+      id: 'transcript-id',
+      recording_id: 'canonical-rec-id',
+      full_text: 'The complete transcript.',
+      summary: 'A concise summary.',
+      transcription_provider: 'openai',
+      transcription_model: 'gpt-transcribe'
+    }
+
+    it('builds Markdown with the authoritative recording date', () => {
+      const content = buildTranscriptExportContent(recording as any, transcript as any, 'markdown')
+
+      expect(content).toContain('# 2026Oct16-102913-Rec21')
+      expect(content).toContain('Recorded: 2026-10-16T15:29:13.000Z')
+      expect(content).toContain('Original file: 2026Oct16-102913-Rec21.hda')
+      expect(content).toContain('## Transcript')
+    })
+
+    it('writes the selected export and preserves its modified timestamp', async () => {
+      const { getRecordingById, getTranscriptByRecordingId, resolveRecordingId } = await import('../../services/database')
+      vi.mocked(resolveRecordingId).mockReturnValue('canonical-rec-id')
+      vi.mocked(getRecordingById).mockReturnValue(recording as any)
+      vi.mocked(getTranscriptByRecordingId).mockReturnValue(transcript as any)
+      vi.mocked(dialog.showSaveDialog).mockResolvedValue({
+        canceled: false,
+        filePath: 'C:\\exports\\meeting-transcript.md'
+      })
+
+      const result = await handlers['transcripts:export'](
+        { sender: {} },
+        'renderer-facing-id',
+        'markdown'
+      )
+
+      expect(result).toEqual({ success: true, filePath: 'C:\\exports\\meeting-transcript.md' })
+      expect(writeFileSync).toHaveBeenCalledWith(
+        'C:\\exports\\meeting-transcript.md',
+        expect.stringContaining('The complete transcript.'),
+        'utf-8'
+      )
+      const sourceDate = new Date('2026-10-16T15:29:13.000Z')
+      expect(utimesSync).toHaveBeenCalledWith('C:\\exports\\meeting-transcript.md', sourceDate, sourceDate)
+    })
+
+    it('renders a PDF, writes its bytes, and preserves the original recording timestamp', async () => {
+      const { getRecordingById, getTranscriptByRecordingId, resolveRecordingId } = await import('../../services/database')
+      const pdfBytes = Buffer.from('%PDF-test')
+      vi.mocked(resolveRecordingId).mockReturnValue('canonical-rec-id')
+      vi.mocked(getRecordingById).mockReturnValue(recording as any)
+      vi.mocked(getTranscriptByRecordingId).mockReturnValue(transcript as any)
+      pdfMocks.createTranscriptPdfBuffer.mockResolvedValue(pdfBytes)
+      vi.mocked(dialog.showSaveDialog).mockResolvedValue({
+        canceled: false,
+        filePath: 'C:\\exports\\meeting-transcript.pdf'
+      })
+
+      const result = await handlers['transcripts:export'](
+        { sender: {} },
+        'renderer-facing-id',
+        'pdf'
+      )
+
+      expect(result).toEqual({ success: true, filePath: 'C:\\exports\\meeting-transcript.pdf' })
+      expect(pdfMocks.createTranscriptPdfBuffer).toHaveBeenCalledWith(recording, transcript)
+      expect(writeFileSync).toHaveBeenCalledWith('C:\\exports\\meeting-transcript.pdf', pdfBytes)
+      const sourceDate = new Date('2026-10-16T15:29:13.000Z')
+      expect(utimesSync).toHaveBeenCalledWith('C:\\exports\\meeting-transcript.pdf', sourceDate, sourceDate)
+    })
+
+    it('rejects unsupported export formats without opening a save dialog', async () => {
+      const result = await handlers['transcripts:export']({ sender: {} }, 'recording-id', 'docx')
+
+      expect(result).toEqual({ success: false, error: 'Invalid transcript export request.' })
+      expect(dialog.showSaveDialog).not.toHaveBeenCalled()
+    })
+
+    it('batch exports source-dated transcripts and writes a provenance manifest', async () => {
+      const { getRecordingById, getTranscriptByRecordingId, resolveRecordingId } = await import('../../services/database')
+      vi.mocked(resolveRecordingId).mockImplementation((id) => id)
+      vi.mocked(getRecordingById).mockImplementation((id) => id === 'rec-1' ? recording as any : undefined)
+      vi.mocked(getTranscriptByRecordingId).mockImplementation((id) => id === 'rec-1' ? transcript as any : undefined)
+      vi.mocked(dialog.showOpenDialog).mockResolvedValue({
+        canceled: false,
+        filePaths: ['C:\\exports']
+      })
+
+      const result = await handlers['transcripts:exportBatch'](
+        { sender: {} },
+        ['rec-1', 'missing-recording'],
+        'markdown'
+      )
+
+      expect(result).toEqual({
+        success: true,
+        directoryPath: 'C:\\exports',
+        manifestPath: 'C:\\exports\\hidock-transcript-manifest.json',
+        exported: 1,
+        skipped: 1
+      })
+      expect(mkdirSync).toHaveBeenCalledWith('C:\\exports', { recursive: true })
+      expect(writeFileSync).toHaveBeenCalledWith(
+        'C:\\exports\\2026Oct16-102913-Rec21-transcript.md',
+        expect.stringContaining('Recorded: 2026-10-16T15:29:13.000Z'),
+        'utf-8'
+      )
+      const sourceDate = new Date('2026-10-16T15:29:13.000Z')
+      expect(utimesSync).toHaveBeenCalledWith(
+        'C:\\exports\\2026Oct16-102913-Rec21-transcript.md',
+        sourceDate,
+        sourceDate
+      )
+      const manifestCall = vi.mocked(writeFileSync).mock.calls.find(
+        ([path]) => path === 'C:\\exports\\hidock-transcript-manifest.json'
+      )
+      expect(manifestCall?.[1]).toEqual(expect.stringContaining('"originalFilename": "2026Oct16-102913-Rec21.hda"'))
+      expect(manifestCall?.[1]).toEqual(expect.stringContaining('"provider": "openai"'))
+      expect(manifestCall?.[1]).toEqual(expect.stringContaining('"model": "gpt-transcribe"'))
+      expect(manifestCall?.[1]).toEqual(expect.stringContaining('"status": "skipped"'))
     })
   })
 
@@ -820,6 +986,19 @@ describe('Recording IPC Handlers', () => {
       expect(result).toBe('queue-item-id')
     })
 
+    it('should resolve a synced-file ID before queueing', async () => {
+      const { addToQueue, resolveRecordingId, updateRecordingTranscriptionStatus } = await import('../../services/database')
+      vi.mocked(resolveRecordingId).mockReturnValue('canonical-recording-id')
+      vi.mocked(addToQueue).mockReturnValue('queue-item-id')
+
+      const result = await handlers['recordings:addToQueue'](null, 'synced-file-id')
+
+      expect(resolveRecordingId).toHaveBeenCalledWith('synced-file-id')
+      expect(addToQueue).toHaveBeenCalledWith('canonical-recording-id')
+      expect(updateRecordingTranscriptionStatus).toHaveBeenCalledWith('canonical-recording-id', 'queued')
+      expect(result).toBe('queue-item-id')
+    })
+
     it('should return false on error', async () => {
       const { addToQueue } = await import('../../services/database')
       vi.mocked(addToQueue).mockImplementation(() => {
@@ -847,7 +1026,7 @@ describe('Recording IPC Handlers', () => {
 
       expect(result).toEqual({
         success: false,
-        error: 'Transcription API key not configured. Please add your API key in Settings.'
+        error: 'Gemini API key not configured. Please add your API key in Settings.'
       })
     })
   })

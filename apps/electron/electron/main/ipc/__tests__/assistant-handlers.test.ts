@@ -5,6 +5,9 @@ import { ipcMain } from 'electron'
 
 // Mock electron ipcMain
 vi.mock('electron', () => ({
+  app: {
+    getPath: vi.fn(() => 'C:\\test-home')
+  },
   ipcMain: {
     handle: vi.fn()
   }

@@ -1882,8 +1882,6 @@ describe('HiDockDeviceService - State Copy Immutability', () => {
 
   it('should return a copy of state, not the original', () => {
     const service = new HiDockDeviceService()
-    const serviceAny = service as any
-
     const state1 = service.getState()
     const state2 = service.getState()
 
@@ -1934,8 +1932,6 @@ describe('HiDockDeviceService - Connection Status Copy Immutability', () => {
 
   it('should not affect internal status when modifying returned status', () => {
     const service = new HiDockDeviceService()
-    const serviceAny = service as any
-
     const status = service.getConnectionStatus()
     status.step = 'ready'
     status.message = 'Modified'
@@ -2205,7 +2201,7 @@ describe('HiDockDeviceService - Refresh Storage Info', () => {
     }
     mockJensen.getCardInfo.mockResolvedValue(mockCardInfo)
 
-    const result = await service.refreshStorageInfo()
+    await service.refreshStorageInfo()
 
     expect(mockJensen.getCardInfo).toHaveBeenCalled()
   })
@@ -3621,7 +3617,7 @@ describe('HiDockDeviceService - persistCacheToStorage error path', () => {
     delete (globalThis as any).window
   })
 
-  it('should use current date when dateCreated is missing', () => {
+  it('should preserve an unknown source date instead of substituting the current time', () => {
     const service = new HiDockDeviceService()
     const serviceAny = service as any
 
@@ -3641,7 +3637,7 @@ describe('HiDockDeviceService - persistCacheToStorage error path', () => {
         filename: 'no-date.wav',
         size: 512,
         duration: 30,
-        dateCreated: expect.any(String)
+        dateCreated: null
       })
     ])
 

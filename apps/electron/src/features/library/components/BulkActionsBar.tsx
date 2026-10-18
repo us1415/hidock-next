@@ -1,4 +1,4 @@
-import { X, Download, Wand2, Trash2, CheckSquare, Square } from 'lucide-react'
+import { X, Download, FileDown, Wand2, Trash2, CheckSquare, Square } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { cn } from '@/lib/utils'
@@ -12,12 +12,14 @@ interface BulkActionsBarProps {
   disabledActions?: {
     download?: boolean
     process?: boolean
+    export?: boolean
     delete?: boolean
   }
   onSelectAll: () => void
   onDeselectAll: () => void
   onDownload: () => void
   onProcess: () => void
+  onExport: () => void
   onDelete: () => void
 }
 
@@ -32,6 +34,7 @@ export function BulkActionsBar({
   onDeselectAll,
   onDownload,
   onProcess,
+  onExport,
   onDelete
 }: BulkActionsBarProps) {
   if (selectedCount === 0) return null
@@ -106,6 +109,18 @@ export function BulkActionsBar({
         >
           <Wand2 className="h-4 w-4" />
           {isProcessing ? 'Processing...' : 'Transcribe'}
+        </Button>
+
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onExport}
+          disabled={isProcessing || disabledActions.export}
+          className="gap-2"
+          title="Export selected completed transcripts with a manifest"
+        >
+          <FileDown className="h-4 w-4" />
+          Export
         </Button>
 
         {/* Delete Action */}

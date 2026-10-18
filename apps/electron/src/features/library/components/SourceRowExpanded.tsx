@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { Calendar } from 'lucide-react'
-import { formatDateTime, formatDuration, formatBytes } from '@/lib/utils'
+import { formatDateTime, formatDuration, formatBytes, formatSourceDateTime } from '@/lib/utils'
 import { Transcript, Meeting } from '@/types'
 import { UnifiedRecording, isDeviceOnly } from '@/types/unified-recording'
 
@@ -28,10 +28,10 @@ export const SourceRowExpanded = memo(function SourceRowExpanded({
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
         <div>
           <p className="text-xs font-medium text-muted-foreground mb-1">Date Recorded</p>
-          <p>{(() => {
-            const date = new Date(recording.dateRecorded)
-            return !isNaN(date.getTime()) ? formatDateTime(date.toISOString()) : 'Unknown'
-          })()}</p>
+          <p>{formatSourceDateTime(
+            recording.sourceDateValue ?? recording.dateRecorded?.toISOString(),
+            recording.sourceDatePrecision
+          )}</p>
         </div>
         <div>
           <p className="text-xs font-medium text-muted-foreground mb-1">Duration</p>

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { getHiDockDeviceService, HiDockRecording } from '@/services/hidock-device'
 import { useAppStore } from '@/store/useAppStore'
+import { shouldLogQa } from '@/services/qa-monitor'
 import {
   UnifiedRecording,
   DeviceOnlyRecording,
@@ -8,6 +9,16 @@ import {
   BothLocationsRecording
 } from '@/types/unified-recording'
 import type { KnowledgeCapture } from '@/types/knowledge'
+import { getStableDeviceId } from '@/utils/deviceIdentity'
+import { parseRecordingDateFromFilename, resolveSourceRecordingDate } from '@/utils/recordingDate'
+
+const qaLog = (...args: unknown[]): void => {
+  if (shouldLogQa()) console.log('[QA-MONITOR][Library]', ...args)
+}
+
+const qaWarn = (...args: unknown[]): void => {
+  if (shouldLogQa()) console.warn('[QA-MONITOR][Library]', ...args)
+}
 
 interface DatabaseRecording {
   id: string
@@ -16,6 +27,8 @@ interface DatabaseRecording {
   file_size: number
   duration_seconds?: number
   date_recorded?: string
+  source_date_precision?: 'exact' | 'date-only' | 'unknown'
+  source_date_evidence?: string
   meeting_id?: string
   // FL-001: transcription_status is the authoritative column; status is the legacy fallback
   transcription_status?: string
@@ -37,56 +50,20 @@ interface CachedDeviceFile {
   file_size?: number  // Database column name
   size?: number       // Alternative field name (for compatibility)
   duration_seconds?: number
-  date_recorded: string
-  cached_at: string
+  date_recorded?: string | null
+  dateCreated?: string | null
+  cached_at?: string
+}
+
+interface DeviceReviewItem {
+  filename: string
+  status: 'new' | 'approved' | 'dismissed'
 }
 
 // Get base filename without extension (for matching .hda and .wav files)
 function getBaseFilename(filename: string): string {
   // Remove common audio extensions
   return filename.replace(/\.(hda|wav|mp3|m4a|aac|ogg|flac)$/i, '')
-}
-
-// Parse date from HiDock filename formats
-function parseDateFromFilename(filename: string): Date | null {
-  const monthNames: Record<string, number> = {
-    'Jan': 0, 'Feb': 1, 'Mar': 2, 'Apr': 3, 'May': 4, 'Jun': 5,
-    'Jul': 6, 'Aug': 7, 'Sep': 8, 'Oct': 9, 'Nov': 10, 'Dec': 11
-  }
-
-  // Format 1: 2025May13-160405-Rec59.hda (YYYYMonDD-HHMMSS)
-  const monthNameMatch = filename.match(/(\d{4})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{1,2})-(\d{2})(\d{2})(\d{2})/)
-  if (monthNameMatch) {
-    const [, year, monthName, day, hour, minute, second] = monthNameMatch
-    const month = monthNames[monthName]
-    return new Date(parseInt(year), month, parseInt(day), parseInt(hour), parseInt(minute), parseInt(second))
-  }
-
-  // Format 2: HDA_YYYYMMDD_HHMMSS.hda or 2025-12-08_0044.hda or 2025-12-08_004400.hda
-  const numericMatch = filename.match(/(\d{4})[-_]?(\d{2})[-_]?(\d{2})[-_](\d{2})(\d{2})(\d{2})?/)
-  if (numericMatch) {
-    const [, year, month, day, hour, minute, second = '00'] = numericMatch
-    return new Date(parseInt(year), parseInt(month) - 1, parseInt(day), parseInt(hour), parseInt(minute), parseInt(second))
-  }
-
-  return null
-}
-
-// Get the best date for a recording - parse from filename first (most reliable), then fallback
-function getBestDate(filename: string, deviceDate: Date | null | undefined, fallback: Date): Date {
-  // Always try to parse from filename first - HiDock filenames contain accurate timestamps
-  const parsed = parseDateFromFilename(filename)
-  if (parsed && !isNaN(parsed.getTime())) {
-    // Note: HiDock filenames appear to be in LOCAL time, not UTC
-    return parsed
-  }
-
-  // Then use device-provided date if valid
-  if (deviceDate && !isNaN(deviceDate.getTime())) {
-    return deviceDate
-  }
-
-  return fallback
 }
 
 /**
@@ -101,7 +78,7 @@ function findMatchByDateTime(
   toleranceSeconds: number = 60
 ): { dbRec?: DatabaseRecording; synced?: SyncedFile; localBaseName?: string } | null {
   // Parse device file date from filename
-  const deviceDate = parseDateFromFilename(deviceRec.filename)
+  const deviceDate = parseRecordingDateFromFilename(deviceRec.filename)
   if (!deviceDate || isNaN(deviceDate.getTime())) return null
 
   // Search through unmatched database recordings
@@ -110,7 +87,7 @@ function findMatchByDateTime(
     if (matchedBaseNames.has(baseName)) continue // Already matched
 
     // Try to parse date from local filename or use db date_recorded
-    const localDate = parseDateFromFilename(dbRec.filename) ||
+    const localDate = parseRecordingDateFromFilename(dbRec.filename) ||
                      (dbRec.date_recorded ? new Date(dbRec.date_recorded) : null)
     if (!localDate || isNaN(localDate.getTime())) continue
 
@@ -136,7 +113,9 @@ function buildRecordingMap(
   syncedFiles: SyncedFile[],
   cachedDeviceFiles: CachedDeviceFile[],
   isConnected: boolean,
-  knowledgeCaptures: KnowledgeCapture[] = []
+  knowledgeCaptures: KnowledgeCapture[] = [],
+  reviewItems: DeviceReviewItem[] = [],
+  deviceId: string | null = null
 ): UnifiedRecording[] {
   // Create lookup maps using BASE filename (without extension)
   // This allows matching .hda (device) with .wav (downloaded) files
@@ -167,6 +146,7 @@ function buildRecordingMap(
   // Track which base filenames have been processed
   const processedBaseNames = new Set<string>()
   const recordingMap = new Map<string, UnifiedRecording>()
+  const reviewStatusByFilename = new Map(reviewItems.map((item) => [item.filename, item.status]))
 
   // Process device recordings first
   for (const deviceRec of deviceRecs) {
@@ -184,11 +164,11 @@ function buildRecordingMap(
         dbRec = dateMatch.dbRec
         synced = dateMatch.synced
         localBaseName = dateMatch.localBaseName
-        console.log(`[buildRecordingMap] Matched by date: ${deviceRec.filename} ←→ ${dbRec?.filename}`)
+        qaLog(`Matched by date: ${deviceRec.filename} ←→ ${dbRec?.filename}`)
       }
     }
 
-    const dateRecorded = getBestDate(deviceRec.filename, deviceRec.dateCreated, new Date())
+    const dateRecorded = resolveSourceRecordingDate(deviceRec.filename, deviceRec.dateCreated)
 
     if (synced || dbRec) {
       const dbId = dbRec?.id || synced!.id
@@ -200,6 +180,9 @@ function buildRecordingMap(
         size: deviceRec.size,
         duration: deviceRec.duration || dbRec?.duration_seconds || 0,
         dateRecorded,
+        sourceDateValue: dateRecorded?.toISOString() ?? null,
+        sourceDatePrecision: dateRecorded ? 'exact' : 'unknown',
+        sourceDateEvidence: dateRecorded ? 'hidock-device' : undefined,
         transcriptionStatus: mapTranscriptionStatus(dbRec?.transcription_status ?? dbRec?.status, capture?.status ?? undefined),
         meetingId: dbRec?.meeting_id,
         location: 'both',
@@ -211,7 +194,9 @@ function buildRecordingMap(
         quality: capture?.quality,
         category: capture?.category ?? undefined,
         status: capture?.status ?? undefined,
-        summary: capture?.summary ?? undefined
+        summary: capture?.summary ?? undefined,
+        reviewStatus: reviewStatusByFilename.get(deviceRec.filename),
+        deviceId: deviceId ?? undefined
       }
       recordingMap.set(baseName, recording)
       processedBaseNames.add(baseName)
@@ -226,10 +211,15 @@ function buildRecordingMap(
         size: deviceRec.size,
         duration: deviceRec.duration,
         dateRecorded,
+        sourceDateValue: dateRecorded?.toISOString() ?? null,
+        sourceDatePrecision: dateRecorded ? 'exact' : 'unknown',
+        sourceDateEvidence: dateRecorded ? 'hidock-device' : undefined,
         transcriptionStatus: 'none',
         location: 'device-only',
         deviceFilename: deviceRec.filename,
-        syncStatus: 'not-synced'
+        syncStatus: 'not-synced',
+        reviewStatus: reviewStatusByFilename.get(deviceRec.filename),
+        deviceId: deviceId ?? undefined
       }
       recordingMap.set(baseName, recording)
       processedBaseNames.add(baseName)
@@ -246,7 +236,9 @@ function buildRecordingMap(
       // IMPORTANT: Use original_filename (device filename) for date parsing if available
       // The local filename may have been saved with the wrong date (download date instead of recording date)
       const filenameForDate = synced?.original_filename || dbRec.filename
-      const dateRecorded = getBestDate(filenameForDate, dbDate, new Date())
+      const dateRecorded = resolveSourceRecordingDate(filenameForDate, dbDate)
+      const sourceDatePrecision = dbRec.source_date_precision
+        ?? (/^\d{4}-\d{2}-\d{2}$/.test(dbRec.date_recorded || '') ? 'date-only' : dateRecorded ? 'exact' : 'unknown')
       const capture = captureMapBySourceId.get(dbRec.id)
 
       const recording: LocalOnlyRecording = {
@@ -255,7 +247,13 @@ function buildRecordingMap(
         size: dbRec.file_size,
         duration: dbRec.duration_seconds || 0,
         dateRecorded,
-        transcriptionStatus: mapTranscriptionStatus(dbRec.status, capture?.status ?? undefined),
+        sourceDateValue: dbRec.date_recorded ?? null,
+        sourceDatePrecision,
+        sourceDateEvidence: dbRec.source_date_evidence,
+        transcriptionStatus: mapTranscriptionStatus(
+          dbRec.transcription_status ?? dbRec.status,
+          capture?.status ?? undefined
+        ),
         meetingId: dbRec.meeting_id,
         location: 'local-only',
         localPath: dbRec.file_path,
@@ -282,14 +280,16 @@ function buildRecordingMap(
     for (const cached of cachedDeviceFiles) {
       const baseName = getBaseFilename(cached.filename)
       if (!processedBaseNames.has(baseName)) {
-        const cachedDate = new Date(cached.date_recorded)
-        const dateRecorded = getBestDate(cached.filename, cachedDate, cachedDate)
+        const cachedRawDate = cached.date_recorded ?? cached.dateCreated
+        const dateRecorded = resolveSourceRecordingDate(cached.filename, cachedRawDate)
         const recording: DeviceOnlyRecording = {
           id: getBaseFilename(cached.filename),
           filename: cached.filename,
           size: cached.file_size ?? cached.size ?? 0,
           duration: cached.duration_seconds || 0,
           dateRecorded,
+          sourceDateValue: dateRecorded?.toISOString() ?? null,
+          sourceDatePrecision: dateRecorded ? 'exact' : 'unknown',
           transcriptionStatus: 'none',
           location: 'device-only',
           deviceFilename: cached.filename,
@@ -302,9 +302,11 @@ function buildRecordingMap(
   }
 
   // Sort by date (newest first)
-  return Array.from(recordingMap.values()).sort(
-    (a, b) => b.dateRecorded.getTime() - a.dateRecorded.getTime()
-  )
+  return Array.from(recordingMap.values()).sort((a, b) => {
+    const aTime = a.dateRecorded?.getTime() ?? Number.NEGATIVE_INFINITY
+    const bTime = b.dateRecorded?.getTime() ?? Number.NEGATIVE_INFINITY
+    return bTime - aTime
+  })
 }
 
 interface UseUnifiedRecordingsResult {
@@ -322,6 +324,7 @@ interface UseUnifiedRecordingsResult {
     unsynced: number
     onSource: number
     locallyAvailable: number
+    reviewNew?: number
   }
 }
 
@@ -359,14 +362,14 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
   const deviceService = getHiDockDeviceService()
 
   const loadRecordings = useCallback(async (forceRefresh: boolean = false) => {
-    console.log('[useUnifiedRecordings] loadRecordings called, forceRefresh:', forceRefresh, 'loadingRef:', loadingRef.current)
+    qaLog('loadRecordings called, forceRefresh:', forceRefresh, 'loadingRef:', loadingRef.current)
 
     // FL-02 FIX: Debounce rapid-fire calls (connection + ready + poll within 2 seconds)
     // This prevents the triple-fire issue where all 3 events trigger simultaneously on device connection
     const now = Date.now()
     const timeSinceLastLoad = now - lastLoadTimestampRef.current
     if (!forceRefresh && timeSinceLastLoad < 2000) {
-      console.log('[useUnifiedRecordings] Debouncing - only', timeSinceLastLoad, 'ms since last load')
+      qaLog('Debouncing - only', timeSinceLastLoad, 'ms since last load')
       return
     }
 
@@ -380,10 +383,10 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     // promise-based queue, but the complexity isn't warranted given the low risk.
     if (loadingRef.current) {
       if (forceRefresh) {
-        console.log('[useUnifiedRecordings] Already loading - queuing forceRefresh')
+        qaLog('Already loading - queuing forceRefresh')
         pendingForceRefreshRef.current = true
       } else {
-        console.log('[useUnifiedRecordings] Skipping - already loading')
+        qaLog('Skipping - already loading')
       }
       return
     }
@@ -401,7 +404,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     try {
       // Guard: Check if running in Electron with full API
       if (!window.electronAPI?.recordings) {
-        console.log('[useUnifiedRecordings] Not in Electron - returning empty data')
+        qaLog('Not in Electron - returning empty data')
         setRecordings([])
         setDeviceConnected(false)
         decrementLoading()
@@ -413,21 +416,25 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       // Check device connection
       const isConnected = deviceService.isConnected()
       setDeviceConnected(isConnected)
-      console.log('[useUnifiedRecordings] Device connected:', isConnected)
+      qaLog('Device connected:', isConnected)
 
       // PHASE 1: Load local data + cache FIRST (fast) for instant display
-      const [dbRecs, syncedFiles, cachedDeviceFiles, knowledgeCaptures] = await Promise.all([
+      const deviceId = getStableDeviceId(deviceService)
+      const [dbRecs, syncedFiles, cachedDeviceFiles, knowledgeCaptures, existingReviewItems] = await Promise.all([
         window.electronAPI.recordings.getAll() as Promise<DatabaseRecording[]>,
         window.electronAPI.syncedFiles.getAll() as Promise<SyncedFile[]>,
         window.electronAPI.deviceCache.getAll() as Promise<CachedDeviceFile[]>,
-        window.electronAPI.knowledge.getAll() as Promise<KnowledgeCapture[]>
+        window.electronAPI.knowledge.getAll() as Promise<KnowledgeCapture[]>,
+        deviceId && window.electronAPI.deviceIngestion
+          ? window.electronAPI.deviceIngestion.getReviewItems({ deviceId })
+          : Promise.resolve([])
       ])
-      console.log('[useUnifiedRecordings] Loaded: dbRecs:', dbRecs.length, 'syncedFiles:', syncedFiles.length, 'cachedDeviceFiles:', cachedDeviceFiles.length, 'knowledgeCaptures:', knowledgeCaptures?.length)
+      qaLog('Loaded: dbRecs:', dbRecs.length, 'syncedFiles:', syncedFiles.length, 'cachedDeviceFiles:', cachedDeviceFiles.length, 'knowledgeCaptures:', knowledgeCaptures?.length)
 
       // Debug: Show sample synced files to verify original_filename is present
       if (syncedFiles.length > 0) {
         const samples = syncedFiles.slice(0, 3)
-        console.log('[useUnifiedRecordings] Sample synced files:', samples.map(sf => ({
+        qaLog('Sample synced files:', samples.map(sf => ({
           local: sf.local_filename,
           original: sf.original_filename
         })))
@@ -440,15 +447,24 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       // Show cached/local data immediately and mark as loaded
       // If we have in-memory cache from device service, use that for immediate display
       // This fixes the issue where navigating to Library shows stale data
-      const initialRecordings = buildRecordingMap(memoryCachedDeviceRecs, dbRecs, syncedFiles, cachedDeviceFiles, isConnected, knowledgeCaptures)
-      console.log('[useUnifiedRecordings] Built', initialRecordings.length, 'recordings')
+      const initialRecordings = buildRecordingMap(
+        memoryCachedDeviceRecs,
+        dbRecs,
+        syncedFiles,
+        cachedDeviceFiles,
+        isConnected,
+        knowledgeCaptures,
+        existingReviewItems,
+        deviceId
+      )
+      qaLog('Built', initialRecordings.length, 'recordings')
 
       // Debug: Show sample dates
       if (initialRecordings.length > 0) {
         const samples = initialRecordings.slice(0, 3)
-        console.log('[useUnifiedRecordings] Sample recording dates:', samples.map(r => ({
+        qaLog('Sample recording dates:', samples.map(r => ({
           filename: r.filename,
-          date: r.dateRecorded.toISOString()
+          date: r.dateRecorded?.toISOString() ?? 'unknown'
         })))
       }
 
@@ -472,7 +488,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
         try {
           deviceRecs = await deviceService.listRecordings(undefined, forceRefresh)
         } catch (deviceError) {
-          console.warn('[useUnifiedRecordings] Failed to get device recordings:', deviceError)
+          qaWarn('Failed to get device recordings:', deviceError)
           // Continue with cached data
         }
       }
@@ -485,18 +501,45 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
           filename: rec.filename,
           size: rec.size ?? 0, // Ensure number, not undefined
           duration: rec.duration ?? 0, // Ensure number, not undefined
-          dateCreated: rec.dateCreated?.toISOString() || new Date().toISOString()
+          dateCreated: rec.dateCreated?.toISOString() ?? null
         }))
         try {
           await window.electronAPI.deviceCache.saveAll(cacheEntries)
         } catch (cacheError) {
-          console.warn('[useUnifiedRecordings] Failed to save device cache:', cacheError)
+          qaWarn('Failed to save device cache:', cacheError)
         }
       }
 
+      let reviewItems = existingReviewItems
+      if (deviceId && window.electronAPI.deviceIngestion && deviceRecs.length > 0) {
+        const observation = await window.electronAPI.deviceIngestion.observeInventory({
+          deviceId,
+          files: deviceRecs.map((recording) => ({
+            filename: recording.filename,
+            fileSize: recording.size ?? 0,
+            recordedAt: resolveSourceRecordingDate(recording.filename, recording.dateCreated)?.toISOString() ?? null
+          }))
+        })
+        // Preserve approved/dismissed states from the initial read while merging newly
+        // discovered items. This keeps the review action reversible in the Library;
+        // observation.pendingItems intentionally contains only status='new' rows.
+        const reviewItemsByFilename = new Map(existingReviewItems.map((item) => [item.filename, item]))
+        for (const item of observation.pendingItems) reviewItemsByFilename.set(item.filename, item)
+        reviewItems = [...reviewItemsByFilename.values()]
+      }
+
       // PHASE 3: Build final recording list with all data (silent update)
-      const finalRecordings = buildRecordingMap(deviceRecs, dbRecs, syncedFiles, cachedDeviceFiles, isConnected, knowledgeCaptures)
-      console.log('[useUnifiedRecordings] Final recordings count:', finalRecordings.length)
+      const finalRecordings = buildRecordingMap(
+        deviceRecs,
+        dbRecs,
+        syncedFiles,
+        cachedDeviceFiles,
+        isConnected,
+        knowledgeCaptures,
+        reviewItems,
+        deviceId
+      )
+      qaLog('Final recordings count:', finalRecordings.length)
       setRecordings(finalRecordings)
       // Decrement loading after final update (covers Phase 2 path only — Phase 1-only already decremented)
       if (!decremented) {
@@ -516,7 +559,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
         pendingForceRefreshRef.current = false
         setTimeout(() => loadRecordingsRef.current(true), 0)
       }
-      console.log('[useUnifiedRecordings] loadRecordings completed')
+      qaLog('loadRecordings completed')
     }
   }, [deviceService, setRecordings, incrementLoading, decrementLoading, setError, markLoaded])
 
@@ -565,7 +608,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     // causing isConnected() to return false and skipping device data fetch
     const unsubStatus = deviceService.onStatusChange((status) => {
       if (status.step === 'ready' && !deviceReadyRefreshDoneRef.current) {
-        console.log('[useUnifiedRecordings] Device ready - forcing refresh to get device files')
+        qaLog('Device ready - forcing refresh to get device files')
         deviceReadyRefreshDoneRef.current = true
         // AUD5-014: Set cooldown to suppress polling after ready event
         connectionEventCooldownRef.current = Date.now()
@@ -586,7 +629,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
   // new downloads may be starting, causing USB concurrency conflicts and stalls.
   useEffect(() => {
     const handleDownloadsCompleted = () => {
-      console.log('[useUnifiedRecordings] Downloads completed - refreshing from DB')
+      qaLog('Downloads completed - refreshing from DB')
       loadRecordings(false)
     }
     window.addEventListener('hidock:downloads-completed', handleDownloadsCompleted)
@@ -598,7 +641,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     if (!window.electronAPI?.onRecordingAdded) return
 
     const unsubscribe = window.electronAPI.onRecordingAdded((data) => {
-      console.log('[useUnifiedRecordings] New recording detected:', data.recording.filename)
+      qaLog('New recording detected:', data.recording.filename)
 
       // Import toast at runtime to avoid circular dependencies
       import('@/components/ui/toaster').then(({ toast }) => {
@@ -646,7 +689,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
         // Check for changes
         if (currentCount !== previousRecordingCount) {
           const diff = currentCount - previousRecordingCount
-          console.log(`[useUnifiedRecordings] Device recording count changed: ${previousRecordingCount} → ${currentCount}`)
+          qaLog(`Device recording count changed: ${previousRecordingCount} → ${currentCount}`)
 
           if (diff > 0) {
             // New recordings detected
@@ -683,6 +726,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     let both = 0
     let synced = 0
     let unsynced = 0
+    let reviewNew = 0
 
     // Single pass through recordings for efficiency
     for (const r of recordings) {
@@ -692,6 +736,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
 
       if (r.syncStatus === 'synced') synced++
       else unsynced++
+      if (r.reviewStatus === 'new') reviewNew++
     }
 
     // Semantic stats for composite filters
@@ -707,7 +752,8 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       unsynced,
       // Semantic counts for dual-mode filter UI
       onSource,
-      locallyAvailable
+      locallyAvailable,
+      reviewNew
     }
   }, [recordings])
 

@@ -2,11 +2,12 @@ import initSqlJs, { Database as SqlJsDatabase } from 'sql.js'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { getDatabasePath } from './file-storage'
+import { buildRecordingMeetingWindow } from './meeting-correlation'
 
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 21
+const SCHEMA_VERSION = 25
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -36,6 +37,9 @@ CREATE TABLE IF NOT EXISTS recordings (
     file_size INTEGER,
     duration_seconds REAL,
     date_recorded TEXT NOT NULL,
+    source_date_precision TEXT NOT NULL DEFAULT 'exact'
+      CHECK(source_date_precision IN ('exact', 'date-only', 'unknown')),
+    source_date_evidence TEXT,
     meeting_id TEXT,
     correlation_confidence REAL,
     correlation_method TEXT,
@@ -288,6 +292,22 @@ CREATE TABLE IF NOT EXISTS transcription_queue (
     FOREIGN KEY (recording_id) REFERENCES recordings(id)
 );
 
+-- Durable per-attempt transcription history
+CREATE TABLE IF NOT EXISTS transcription_history (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    queue_item_id TEXT,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'processing',
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    elapsed_ms INTEGER,
+    error_message TEXT,
+    FOREIGN KEY (recording_id) REFERENCES recordings(id)
+);
+
 -- Transcription service mutex lock (v19)
 CREATE TABLE IF NOT EXISTS transcription_service_lock (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -424,8 +444,45 @@ CREATE TABLE IF NOT EXISTS device_files_cache (
     filename TEXT NOT NULL UNIQUE,
     file_size INTEGER,
     duration_seconds REAL,
-    date_recorded TEXT NOT NULL,
+    date_recorded TEXT,
     cached_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Per-device discovery baseline and safe pre-transcription review queue (v22)
+CREATE TABLE IF NOT EXISTS device_ingestion_state (
+    device_id TEXT PRIMARY KEY,
+    last_seen_recorded_at TEXT,
+    last_seen_filename TEXT,
+    last_scan_at TEXT NOT NULL,
+    last_successful_sync_at TEXT,
+    last_successful_sync_recorded_at TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS device_review_queue (
+    id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    file_size INTEGER,
+    recorded_at TEXT,
+    status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new', 'approved', 'dismissed')),
+    first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TEXT,
+    UNIQUE(device_id, filename),
+    FOREIGN KEY (device_id) REFERENCES device_ingestion_state(device_id) ON DELETE CASCADE
+);
+
+-- Durable, non-destructive review decisions for Otter-to-HiDock reconciliation (v25)
+CREATE TABLE IF NOT EXISTS otter_reconciliation_reviews (
+    imported_recording_id TEXT PRIMARY KEY,
+    device_filename TEXT,
+    decision TEXT NOT NULL DEFAULT 'pending'
+      CHECK(decision IN ('pending', 'confirmed', 'separate')),
+    match_method TEXT
+      CHECK(match_method IS NULL OR match_method IN ('exact-timestamp', 'date-duration', 'adjacent-date-duration')),
+    reviewed_at TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (imported_recording_id) REFERENCES recordings(id) ON DELETE CASCADE
 );
 
 -- Quality assessments for recordings (v10)
@@ -444,6 +501,8 @@ CREATE TABLE IF NOT EXISTS quality_assessments (
 -- -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_device_cache_filename ON device_files_cache(filename);
 CREATE INDEX IF NOT EXISTS idx_device_cache_date ON device_files_cache(date_recorded);
+CREATE INDEX IF NOT EXISTS idx_device_review_status ON device_review_queue(device_id, status, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_otter_reconciliation_decision ON otter_reconciliation_reviews(decision, updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_meetings_start_time ON meetings(start_time);
 CREATE INDEX IF NOT EXISTS idx_recordings_date ON recordings(date_recorded);
@@ -452,6 +511,7 @@ CREATE INDEX IF NOT EXISTS idx_recordings_status ON recordings(status);
 CREATE INDEX IF NOT EXISTS idx_transcripts_recording ON transcripts(recording_id);
 CREATE INDEX IF NOT EXISTS idx_embeddings_transcript ON embeddings(transcript_id);
 CREATE INDEX IF NOT EXISTS idx_queue_status ON transcription_queue(status);
+CREATE INDEX IF NOT EXISTS idx_transcription_history_recording ON transcription_history(recording_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_synced_original ON synced_files(original_filename);
 CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email);
 CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name);
@@ -1196,6 +1256,93 @@ const MIGRATIONS: Record<number, () => void> = {
     }
 
     console.log('Migration v21 complete: meeting_id backfill applied')
+  },
+  22: () => {
+    // Tables are created by the idempotent core schema before migrations run.
+    console.log('Running migration to schema v22: Adding per-device discovery and review queue tables')
+  },
+  23: () => {
+    // Unknown source dates must remain NULL rather than being replaced with an
+    // observation/upload timestamp. SQLite cannot drop a NOT NULL constraint
+    // in place, so rebuild only the review table while preserving its rows.
+    console.log('Running migration to schema v23: Allowing unknown device source dates')
+    const database = getDatabase()
+    database.run('PRAGMA foreign_keys = OFF')
+    try {
+      database.run('BEGIN TRANSACTION')
+      database.run('DROP TABLE IF EXISTS device_review_queue_v23')
+      database.run(`
+        CREATE TABLE device_review_queue_v23 (
+          id TEXT PRIMARY KEY,
+          device_id TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          file_size INTEGER,
+          recorded_at TEXT,
+          status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new', 'approved', 'dismissed')),
+          first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          reviewed_at TEXT,
+          UNIQUE(device_id, filename),
+          FOREIGN KEY (device_id) REFERENCES device_ingestion_state(device_id) ON DELETE CASCADE
+        )
+      `)
+      database.run(`
+        INSERT INTO device_review_queue_v23
+          (id, device_id, filename, file_size, recorded_at, status, first_seen_at, reviewed_at)
+        SELECT id, device_id, filename, file_size, recorded_at, status, first_seen_at, reviewed_at
+        FROM device_review_queue
+      `)
+      database.run('DROP TABLE device_review_queue')
+      database.run('ALTER TABLE device_review_queue_v23 RENAME TO device_review_queue')
+      database.run(
+        'CREATE INDEX IF NOT EXISTS idx_device_review_status ON device_review_queue(device_id, status, recorded_at DESC)'
+      )
+      database.run('COMMIT')
+    } catch (error) {
+      try { database.run('ROLLBACK') } catch { /* best effort */ }
+      throw error
+    } finally {
+      database.run('PRAGMA foreign_keys = ON')
+    }
+  },
+  24: () => {
+    console.log('Running migration to schema v24: Adding source-date precision metadata')
+    const database = getDatabase()
+    const info = database.exec('PRAGMA table_info(recordings)')
+    const columns = info.length > 0 ? info[0].values.map((column) => column[1]) : []
+    if (!columns.includes('source_date_precision')) {
+      database.run(
+        "ALTER TABLE recordings ADD COLUMN source_date_precision TEXT NOT NULL DEFAULT 'exact' " +
+        "CHECK(source_date_precision IN ('exact', 'date-only', 'unknown'))"
+      )
+    }
+    if (!columns.includes('source_date_evidence')) {
+      database.run('ALTER TABLE recordings ADD COLUMN source_date_evidence TEXT')
+    }
+    database.run(
+      "UPDATE recordings SET source_date_precision = 'exact' " +
+      "WHERE source_date_precision IS NULL OR source_date_precision NOT IN ('exact', 'date-only', 'unknown')"
+    )
+  },
+  25: () => {
+    console.log('Running migration to schema v25: Adding durable Otter reconciliation reviews')
+    const database = getDatabase()
+    database.run(`
+      CREATE TABLE IF NOT EXISTS otter_reconciliation_reviews (
+        imported_recording_id TEXT PRIMARY KEY,
+        device_filename TEXT,
+        decision TEXT NOT NULL DEFAULT 'pending'
+          CHECK(decision IN ('pending', 'confirmed', 'separate')),
+        match_method TEXT
+          CHECK(match_method IS NULL OR match_method IN ('exact-timestamp', 'date-duration', 'adjacent-date-duration')),
+        reviewed_at TEXT,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (imported_recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+      )
+    `)
+    database.run(
+      'CREATE INDEX IF NOT EXISTS idx_otter_reconciliation_decision ' +
+      'ON otter_reconciliation_reviews(decision, updated_at DESC)'
+    )
   }
 
 }
@@ -1238,9 +1385,17 @@ export async function initializeDatabase(): Promise<void> {
     // --- PHASE 1: CORE TABLES ---
     console.log('[Database] Phase 1: Ensuring core tables exist...')
     for (const sql of statements) {
-      if (sql.toUpperCase().startsWith('CREATE TABLE')) {
+      // Statements in SCHEMA are introduced by descriptive SQL comments. Strip
+      // comment-only lines before identifying CREATE TABLE statements so a fresh
+      // database actually receives its core tables before structural repair.
+      const executableSql = sql
+        .split(/\r?\n/)
+        .filter((line) => !line.trim().startsWith('--'))
+        .join('\n')
+        .trim()
+      if (executableSql.toUpperCase().startsWith('CREATE TABLE')) {
         try {
-          database.run(sql)
+          database.run(executableSql)
         } catch (e) {
           console.warn(`[Database] Table creation warning: ${(e as Error).message}`)
         }
@@ -1257,7 +1412,9 @@ export async function initializeDatabase(): Promise<void> {
     const recordingRepairs = [
       { name: 'migrated_to_capture_id', def: "TEXT" },
       { name: 'migration_status', def: "TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending'" },
-      { name: 'migrated_at', def: "TEXT" }
+      { name: 'migrated_at', def: "TEXT" },
+      { name: 'source_date_precision', def: "TEXT NOT NULL DEFAULT 'exact' CHECK(source_date_precision IN ('exact', 'date-only', 'unknown'))" },
+      { name: 'source_date_evidence', def: 'TEXT' }
     ]
     for (const col of recordingRepairs) {
       if (!recCols.includes(col.name)) {
@@ -1580,7 +1737,13 @@ export function getMeetingById(id: string): Meeting | undefined {
   return queryOne<Meeting>('SELECT * FROM meetings WHERE id = ?', [id])
 }
 
-export function updateMeeting(id: string, updates: Partial<Pick<Meeting, 'subject' | 'start_time' | 'end_time' | 'location' | 'description'>>): void {
+export function updateMeeting(id: string, updates: Partial<{
+  subject: string
+  start_time: string
+  end_time: string
+  location: string | null
+  description: string | null
+}>): void {
   const fields: string[] = []
   const params: unknown[] = []
 
@@ -1764,6 +1927,8 @@ export interface Recording {
   file_size?: number
   duration_seconds?: number
   date_recorded: string
+  source_date_precision?: 'exact' | 'date-only' | 'unknown'
+  source_date_evidence?: string
   meeting_id?: string
   correlation_confidence?: number
   correlation_method?: string
@@ -1813,6 +1978,51 @@ export function getRecordingsByIds(ids: string[]): Map<string, Recording> {
 // Get recording by filename (canonical identifier)
 export function getRecordingByFilename(filename: string): Recording | undefined {
   return queryOne<Recording>('SELECT * FROM recordings WHERE filename = ?', [filename])
+}
+
+/**
+ * Find the database record that owns a local audio path.
+ *
+ * Imported recordings intentionally keep their human-readable source filename
+ * in `filename` while their collision-safe physical filename lives in
+ * `file_path`. Watchers therefore must reconcile by path as well as filename or
+ * they can create a second record for the same file.
+ */
+export function getRecordingByFilePath(filePath: string): Recording | undefined {
+  return queryOne<Recording>('SELECT * FROM recordings WHERE file_path = ?', [filePath])
+}
+
+/**
+ * Resolve a renderer-facing recording identifier to the canonical recordings.id.
+ *
+ * Unified library rows can temporarily use synced_files.id while the recording
+ * watcher is reconciling a newly downloaded device file. Transcription tables,
+ * however, require the canonical recordings.id. Resolve through the shared
+ * local path so an immediate click after download cannot enqueue an orphan ID.
+ */
+export function resolveRecordingId(id: string): string | undefined {
+  const recording = getRecordingById(id)
+  if (recording) return recording.id
+
+  const synced = queryOne<SyncedFile>('SELECT * FROM synced_files WHERE id = ?', [id])
+  if (!synced) return undefined
+
+  const byPath = queryOne<Recording>('SELECT * FROM recordings WHERE file_path = ?', [synced.file_path])
+  if (byPath) return byPath.id
+
+  const filenames = [
+    synced.local_filename,
+    synced.original_filename,
+    synced.original_filename.replace(/\.hda$/i, '.mp3'),
+    synced.original_filename.replace(/\.hda$/i, '.wav')
+  ]
+
+  for (const filename of new Set(filenames)) {
+    const byFilename = getRecordingByFilename(filename)
+    if (byFilename) return byFilename.id
+  }
+
+  return undefined
 }
 
 // Update recording lifecycle state
@@ -1877,8 +2087,9 @@ export function upsertRecordingFromDevice(deviceFile: {
     const id = crypto.randomUUID()
     run(
       `INSERT INTO recordings (id, filename, file_path, file_size, duration_seconds, date_recorded,
-        status, location, transcription_status, on_device, device_last_seen, on_local, source, is_imported)
-       VALUES (?, ?, NULL, ?, ?, ?, 'none', 'device-only', 'none', 1, ?, 0, 'hidock', 0)`,
+        source_date_precision, source_date_evidence, status, location, transcription_status,
+        on_device, device_last_seen, on_local, source, is_imported)
+       VALUES (?, ?, NULL, ?, ?, ?, 'exact', 'hidock-device', 'none', 'device-only', 'none', 1, ?, 0, 'hidock', 0)`,
       [id, deviceFile.filename, deviceFile.size, deviceFile.duration, deviceFile.dateCreated.toISOString(), now]
     )
     return getRecordingById(id)!
@@ -1941,8 +2152,10 @@ export function insertRecording(recording: Omit<Recording, 'created_at'>): void 
   run(
     `INSERT INTO recordings (id, filename, original_filename, file_path, file_size,
       duration_seconds, date_recorded, meeting_id, correlation_confidence,
-      correlation_method, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      correlation_method, status, location, transcription_status, on_device,
+      device_last_seen, on_local, source, is_imported, storage_tier,
+      source_date_precision, source_date_evidence)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       recording.id,
       recording.filename,
@@ -1954,7 +2167,17 @@ export function insertRecording(recording: Omit<Recording, 'created_at'>): void 
       recording.meeting_id ?? null,
       recording.correlation_confidence ?? null,
       recording.correlation_method ?? null,
-      recording.status
+      recording.status,
+      recording.location,
+      recording.transcription_status,
+      recording.on_device,
+      recording.device_last_seen ?? null,
+      recording.on_local,
+      recording.source,
+      recording.is_imported,
+      recording.storage_tier ?? null,
+      recording.source_date_precision ?? 'exact',
+      recording.source_date_evidence ?? null
     ]
   )
 }
@@ -2068,6 +2291,58 @@ export function insertTranscript(transcript: Omit<Transcript, 'created_at'>): vo
   )
 }
 
+export interface OtterDatabaseImportItem {
+  recording: Omit<Recording, 'created_at'>
+  transcript?: Omit<Transcript, 'created_at'>
+}
+
+/**
+ * Insert an Otter import batch with one database save and all-or-nothing SQL
+ * semantics. Filesystem staging is handled by the import service before this
+ * boundary is entered.
+ */
+export function importOtterRecordsAtomically(items: OtterDatabaseImportItem[]): void {
+  runInTransaction(() => {
+    for (const { recording, transcript } of items) {
+      runNoSave(
+        `INSERT INTO recordings (id, filename, original_filename, file_path, file_size,
+          duration_seconds, date_recorded, meeting_id, correlation_confidence,
+          correlation_method, status, location, transcription_status, on_device,
+          device_last_seen, on_local, source, is_imported, storage_tier,
+          source_date_precision, source_date_evidence)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          recording.id, recording.filename, recording.original_filename ?? null,
+          recording.file_path, recording.file_size ?? null, recording.duration_seconds ?? null,
+          recording.date_recorded, recording.meeting_id ?? null,
+          recording.correlation_confidence ?? null, recording.correlation_method ?? null,
+          recording.status, recording.location, recording.transcription_status,
+          recording.on_device, recording.device_last_seen ?? null, recording.on_local,
+          recording.source, recording.is_imported, recording.storage_tier ?? null,
+          recording.source_date_precision ?? 'exact', recording.source_date_evidence ?? null
+        ]
+      )
+
+      if (transcript) {
+        runNoSave(
+          `INSERT INTO transcripts (id, recording_id, full_text, language, summary, action_items,
+            topics, key_points, sentiment, speakers, word_count, transcription_provider,
+            transcription_model, title_suggestion, question_suggestions)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            transcript.id, transcript.recording_id, transcript.full_text, transcript.language,
+            transcript.summary ?? null, transcript.action_items ?? null, transcript.topics ?? null,
+            transcript.key_points ?? null, transcript.sentiment ?? null, transcript.speakers ?? null,
+            transcript.word_count ?? null, transcript.transcription_provider ?? null,
+            transcript.transcription_model ?? null, transcript.title_suggestion ?? null,
+            transcript.question_suggestions ?? null
+          ]
+        )
+      }
+    }
+  })
+}
+
 /**
  * Escape special LIKE pattern characters to prevent SQL injection via wildcards.
  * In SQLite LIKE, % matches any sequence and _ matches any single character.
@@ -2126,6 +2401,79 @@ export interface QueueItem {
   created_at: string
   started_at?: string
   completed_at?: string
+}
+
+export interface TranscriptionHistoryItem {
+  id: string
+  recording_id: string
+  queue_item_id: string | null
+  provider: string
+  model: string
+  attempt: number
+  status: 'processing' | 'completed' | 'failed' | 'cancelled'
+  started_at: string
+  completed_at: string | null
+  elapsed_ms: number | null
+  error_message: string | null
+}
+
+export function startTranscriptionHistory(
+  recordingId: string,
+  queueItemId: string,
+  provider: string,
+  model: string,
+  attempt: number
+): string {
+  const id = crypto.randomUUID()
+  run(
+    `INSERT INTO transcription_history
+      (id, recording_id, queue_item_id, provider, model, attempt, status, started_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'processing', ?)`,
+    [id, recordingId, queueItemId, provider, model, attempt, new Date().toISOString()]
+  )
+  return id
+}
+
+export function finishTranscriptionHistory(
+  id: string,
+  status: 'completed' | 'failed' | 'cancelled',
+  elapsedMs: number,
+  errorMessage?: string
+): void {
+  run(
+    `UPDATE transcription_history
+     SET status = ?, completed_at = ?, elapsed_ms = ?, error_message = ?
+     WHERE id = ?`,
+    [status, new Date().toISOString(), Math.max(0, Math.round(elapsedMs)), errorMessage ?? null, id]
+  )
+}
+
+export function getTranscriptionHistory(recordingId: string): TranscriptionHistoryItem[] {
+  const history = queryAll<TranscriptionHistoryItem>(
+    'SELECT * FROM transcription_history WHERE recording_id = ? ORDER BY started_at DESC',
+    [recordingId]
+  )
+  if (history.length > 0) return history
+
+  // Backfill visibility for transcriptions completed before durable history was introduced.
+  return queryAll<TranscriptionHistoryItem>(
+    `SELECT tq.id, tq.recording_id, tq.id AS queue_item_id,
+            COALESCE(t.transcription_provider, 'unknown') AS provider,
+            COALESCE(t.transcription_model, 'unknown') AS model,
+            CASE WHEN tq.attempts > 0 THEN tq.attempts ELSE 1 END AS attempt,
+            tq.status,
+            COALESCE(tq.started_at, tq.created_at) AS started_at,
+            tq.completed_at,
+            CASE WHEN tq.started_at IS NOT NULL AND tq.completed_at IS NOT NULL
+              THEN CAST((julianday(tq.completed_at) - julianday(tq.started_at)) * 86400000 AS INTEGER)
+              ELSE NULL END AS elapsed_ms,
+            tq.error_message
+     FROM transcription_queue tq
+     LEFT JOIN transcripts t ON t.recording_id = tq.recording_id
+     WHERE tq.recording_id = ?
+     ORDER BY COALESCE(tq.started_at, tq.created_at) DESC`,
+    [recordingId]
+  )
 }
 
 export function addToQueue(recordingId: string): string {
@@ -2277,6 +2625,162 @@ export function clearAllSyncedFiles(): number {
 export function getSyncedFilenames(): Set<string> {
   const files = queryAll<{ original_filename: string }>('SELECT original_filename FROM synced_files')
   return new Set(files.map((f) => f.original_filename))
+}
+
+// =============================================================================
+// Device ingestion state and pre-transcription review queue (v22)
+// =============================================================================
+
+export type DeviceReviewStatus = 'new' | 'approved' | 'dismissed'
+
+export interface DeviceIngestionState {
+  device_id: string
+  last_seen_recorded_at: string | null
+  last_seen_filename: string | null
+  last_scan_at: string
+  last_successful_sync_at: string | null
+  last_successful_sync_recorded_at: string | null
+  updated_at: string
+}
+
+export interface DeviceReviewItem {
+  id: string
+  device_id: string
+  filename: string
+  file_size: number | null
+  recorded_at: string | null
+  status: DeviceReviewStatus
+  first_seen_at: string
+  reviewed_at: string | null
+}
+
+export interface ObservedDeviceFile {
+  filename: string
+  fileSize: number
+  recordedAt: string | null
+}
+
+export interface ObserveDeviceInventoryResult {
+  baselineInitialized: boolean
+  newItems: DeviceReviewItem[]
+  pendingItems: DeviceReviewItem[]
+  state: DeviceIngestionState
+}
+
+export function getDeviceIngestionState(deviceId: string): DeviceIngestionState | undefined {
+  return queryOne<DeviceIngestionState>('SELECT * FROM device_ingestion_state WHERE device_id = ?', [deviceId])
+}
+
+export function getDeviceReviewItems(deviceId: string, status?: DeviceReviewStatus): DeviceReviewItem[] {
+  if (status) {
+    return queryAll<DeviceReviewItem>(
+      'SELECT * FROM device_review_queue WHERE device_id = ? AND status = ? ORDER BY recorded_at IS NULL, recorded_at DESC, filename DESC',
+      [deviceId, status]
+    )
+  }
+  return queryAll<DeviceReviewItem>(
+    'SELECT * FROM device_review_queue WHERE device_id = ? ORDER BY recorded_at IS NULL, recorded_at DESC, filename DESC',
+    [deviceId]
+  )
+}
+
+/**
+ * Observe a complete device inventory without triggering downloads or paid work.
+ *
+ * The first observation establishes a baseline: existing recordings are stored as
+ * dismissed so a long-lived device does not suddenly present hundreds of old files
+ * as new. Later observations add only previously unseen filenames to the review queue.
+ */
+export function observeDeviceInventory(
+  deviceId: string,
+  files: ObservedDeviceFile[],
+  observedAt = new Date().toISOString()
+): ObserveDeviceInventoryResult {
+  const existingState = getDeviceIngestionState(deviceId)
+  const baselineInitialized = !existingState
+  const orderedFiles = [...files].sort((a, b) => {
+    const dateComparison = (a.recordedAt ?? '').localeCompare(b.recordedAt ?? '')
+    return dateComparison !== 0 ? dateComparison : a.filename.localeCompare(b.filename)
+  })
+  const latest = orderedFiles.at(-1)
+  const latestKnown = orderedFiles.filter((file) => file.recordedAt !== null).at(-1)
+  const insertedIds: string[] = []
+
+  runInTransaction(() => {
+    if (!existingState) {
+      runNoSave(
+        `INSERT INTO device_ingestion_state (
+          device_id, last_seen_recorded_at, last_seen_filename, last_scan_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)`,
+        [deviceId, latestKnown?.recordedAt ?? null, latest?.filename ?? null, observedAt, observedAt]
+      )
+    } else {
+      runNoSave(
+        `UPDATE device_ingestion_state
+         SET last_seen_recorded_at = ?, last_seen_filename = ?, last_scan_at = ?, updated_at = ?
+         WHERE device_id = ?`,
+        [latestKnown?.recordedAt ?? existingState.last_seen_recorded_at,
+          latest?.filename ?? existingState.last_seen_filename, observedAt, observedAt, deviceId]
+      )
+    }
+
+    for (const file of orderedFiles) {
+      const id = crypto.randomUUID()
+      const status: DeviceReviewStatus = baselineInitialized ? 'dismissed' : 'new'
+      const reviewedAt = baselineInitialized ? observedAt : null
+      runNoSave(
+        `INSERT OR IGNORE INTO device_review_queue (
+          id, device_id, filename, file_size, recorded_at, status, first_seen_at, reviewed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, deviceId, file.filename, file.fileSize, file.recordedAt, status, observedAt, reviewedAt]
+      )
+      if (!baselineInitialized && getDatabase().getRowsModified() > 0) insertedIds.push(id)
+    }
+  })
+
+  const state = getDeviceIngestionState(deviceId)
+  if (!state) throw new Error(`Failed to initialize ingestion state for device ${deviceId}`)
+
+  const newItemSet = new Set(insertedIds)
+  const pendingItems = getDeviceReviewItems(deviceId, 'new')
+  return {
+    baselineInitialized,
+    newItems: pendingItems.filter((item) => newItemSet.has(item.id)),
+    pendingItems,
+    state
+  }
+}
+
+export function updateDeviceReviewStatus(
+  deviceId: string,
+  filename: string,
+  status: DeviceReviewStatus,
+  reviewedAt = new Date().toISOString()
+): DeviceReviewItem | undefined {
+  run(
+    `UPDATE device_review_queue
+     SET status = ?, reviewed_at = ?
+     WHERE device_id = ? AND filename = ?`,
+    [status, status === 'new' ? null : reviewedAt, deviceId, filename]
+  )
+  return queryOne<DeviceReviewItem>(
+    'SELECT * FROM device_review_queue WHERE device_id = ? AND filename = ?',
+    [deviceId, filename]
+  )
+}
+
+export function markDeviceSyncSuccess(
+  deviceId: string,
+  latestSyncedRecordedAt: string | null,
+  syncedAt = new Date().toISOString()
+): DeviceIngestionState | undefined {
+  run(
+    `UPDATE device_ingestion_state
+     SET last_successful_sync_at = ?, last_successful_sync_recorded_at = ?, updated_at = ?
+     WHERE device_id = ?`,
+    [syncedAt, latestSyncedRecordedAt, syncedAt, deviceId]
+  )
+  return getDeviceIngestionState(deviceId)
 }
 
 // =============================================================================
@@ -2729,14 +3233,15 @@ export function findCandidateMeetingsForRecording(recordingId: string): Meeting[
   const recording = getRecordingById(recordingId)
   if (!recording) return []
 
-  const recStart = new Date(recording.date_recorded)
-  const durationMs = (recording.duration_seconds || 30 * 60) * 1000
-  const recEnd = new Date(recStart.getTime() + durationMs)
-
-  // Buffer: 30 min before recording start, 30 min after recording end
-  const bufferMs = 30 * 60 * 1000
-  const windowStart = new Date(recStart.getTime() - bufferMs).toISOString()
-  const windowEnd = new Date(recEnd.getTime() + bufferMs).toISOString()
+  // The device-derived date_recorded value remains authoritative. Never fall
+  // back to created_at (the local import/upload time) for calendar matching.
+  const window = buildRecordingMeetingWindow(
+    recording.date_recorded,
+    recording.duration_seconds,
+    30,
+    recording.source_date_precision
+  )
+  if (!window) return []
 
   // Find meetings that overlap with this time window
   return queryAll<Meeting>(
@@ -2745,12 +3250,16 @@ export function findCandidateMeetingsForRecording(recordingId: string): Meeting[
         OR (start_time >= ? AND start_time <= ?)
         OR (end_time >= ? AND end_time <= ?)
      ORDER BY start_time`,
-    [windowEnd, windowStart, windowStart, windowEnd, windowStart, windowEnd]
+    [window.endIso, window.startIso, window.startIso, window.endIso, window.startIso, window.endIso]
   )
 }
 
 /**
- * Add a candidate meeting for a recording
+ * Add a candidate meeting for a recording.
+ *
+ * Persisting a candidate never changes the recording link by itself. The
+ * caller must apply the automatic-link policy or obtain an explicit user
+ * choice before calling linkRecordingToMeeting().
  */
 export function addRecordingMeetingCandidate(
   recordingId: string,
@@ -2766,11 +3275,6 @@ export function addRecordingMeetingCandidate(
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [id, recordingId, meetingId, confidenceScore, matchReason, isAiSelected ? 1 : 0, isAiSelected ? 1 : 0]
   )
-
-  // If AI selected, also update the recording's meeting_id
-  if (isAiSelected) {
-    linkRecordingToMeeting(recordingId, meetingId, confidenceScore, 'ai_transcript_match')
-  }
 
   return id
 }

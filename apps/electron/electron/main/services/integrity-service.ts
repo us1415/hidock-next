@@ -59,6 +59,64 @@ export interface RepairResult {
   error?: string
 }
 
+export function getRecordingSourceDateIssue(
+  recording: Pick<Recording, 'id' | 'filename' | 'date_recorded'>,
+  now = new Date()
+): IntegrityIssue | null {
+  const dateRecorded = new Date(recording.date_recorded)
+  if (Number.isNaN(dateRecorded.getTime())) {
+    return {
+      id: `date_invalid_${recording.id}`,
+      type: 'date_mismatch',
+      severity: 'high',
+      description: `Recording "${recording.filename}" has invalid date: ${recording.date_recorded}`,
+      filename: recording.filename,
+      recordingId: recording.id,
+      suggestedAction: 'manual',
+      autoRepairable: false,
+      details: { raw_date: recording.date_recorded }
+    }
+  }
+
+  const minValidDate = new Date('2020-01-01')
+  const maxValidDate = new Date(now.getTime() + 24 * 60 * 60 * 1000)
+  if (dateRecorded < minValidDate) {
+    return {
+      id: `date_too_old_${recording.id}`,
+      type: 'date_mismatch',
+      severity: 'medium',
+      description: `Recording "${recording.filename}" has suspicious old date: ${dateRecorded.toISOString()}`,
+      filename: recording.filename,
+      recordingId: recording.id,
+      suggestedAction: 'manual',
+      autoRepairable: false,
+      details: {
+        recorded_date: dateRecorded.toISOString(),
+        reason: 'No trustworthy source timestamp was found; ingestion time is not a valid replacement.'
+      }
+    }
+  }
+
+  if (dateRecorded > maxValidDate) {
+    return {
+      id: `date_future_${recording.id}`,
+      type: 'date_mismatch',
+      severity: 'medium',
+      description: `Recording "${recording.filename}" has future date: ${dateRecorded.toISOString()}`,
+      filename: recording.filename,
+      recordingId: recording.id,
+      suggestedAction: 'manual',
+      autoRepairable: false,
+      details: {
+        recorded_date: dateRecorded.toISOString(),
+        reason: 'Current time is not a valid replacement for the source recording date.'
+      }
+    }
+  }
+
+  return null
+}
+
 // =============================================================================
 // Filename Date Parsing
 // =============================================================================
@@ -76,50 +134,49 @@ const MONTH_NAMES: Record<string, number> = {
  * - 2025-07-08_1604.wav (YYYY-MM-DD_HHMM format, our saved format)
  * - HDA_20250708_160405.hda (HDA_YYYYMMDD_HHMMSS format)
  */
-function parseHiDockFilenameDate(filename: string): Date | undefined {
+function validFilenameDate(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number
+): Date | undefined {
+  const value = new Date(year, month, day, hour, minute, second)
+  if (
+    value.getFullYear() !== year ||
+    value.getMonth() !== month ||
+    value.getDate() !== day ||
+    value.getHours() !== hour ||
+    value.getMinutes() !== minute ||
+    value.getSeconds() !== second
+  ) return undefined
+  return value
+}
+
+export function parseHiDockFilenameDate(filename: string): Date | undefined {
   // Format 1: 2025Jul08-160405-Rec59.hda (YYYYMonDD-HHMMSS) - Device format
-  const monthNameMatch = filename.match(/(\d{4})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{1,2})-(\d{2})(\d{2})(\d{2})/)
+  const monthNameMatch = filename.match(/^(\d{4})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{2})-(\d{2})(\d{2})(\d{2})(?:-|\.|$)/)
   if (monthNameMatch) {
     const [, year, monthName, day, hour, minute, second] = monthNameMatch
     const month = MONTH_NAMES[monthName]
     if (month !== undefined) {
-      return new Date(
-        parseInt(year),
-        month,
-        parseInt(day),
-        parseInt(hour),
-        parseInt(minute),
-        parseInt(second)
-      )
+      return validFilenameDate(+year, month, +day, +hour, +minute, +second)
     }
   }
 
   // Format 2: 2025-07-08_1604.wav (YYYY-MM-DD_HHMM) - Our saved format
-  const savedMatch = filename.match(/(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})/)
+  const savedMatch = filename.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})(?:-|\.|$)/)
   if (savedMatch) {
     const [, year, month, day, hour, minute] = savedMatch
-    return new Date(
-      parseInt(year),
-      parseInt(month) - 1,
-      parseInt(day),
-      parseInt(hour),
-      parseInt(minute),
-      0
-    )
+    return validFilenameDate(+year, +month - 1, +day, +hour, +minute, 0)
   }
 
   // Format 3: HDA_20250708_160405.hda or YYYYMMDDHHMMSS
-  const numericMatch = filename.match(/(\d{4})[-_]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})(\d{2})(\d{2})/)
+  const numericMatch = filename.match(/^(?:HDA_)?(\d{4})(\d{2})(\d{2})[_-]?(\d{2})(\d{2})(\d{2})(?:-|\.|$)/i)
   if (numericMatch) {
     const [, year, month, day, hour, minute, second] = numericMatch
-    return new Date(
-      parseInt(year),
-      parseInt(month) - 1,
-      parseInt(day),
-      parseInt(hour),
-      parseInt(minute),
-      parseInt(second)
-    )
+    return validFilenameDate(+year, +month - 1, +day, +hour, +minute, +second)
   }
 
   return undefined
@@ -575,61 +632,12 @@ class IntegrityService {
   private findDateMismatches(): IntegrityIssue[] {
     const issues: IntegrityIssue[] = []
     const now = new Date()
-    const minValidDate = new Date('2020-01-01') // HiDock devices weren't made before 2020
-    const maxValidDate = new Date(now.getTime() + 24 * 60 * 60 * 1000) // 1 day in future max
-
     // 1. Check database recordings for invalid/suspicious dates
     const recordings = queryAll<Recording>('SELECT * FROM recordings')
 
     for (const rec of recordings) {
-      const dateRecorded = new Date(rec.date_recorded)
-
-      if (isNaN(dateRecorded.getTime())) {
-        issues.push({
-          id: `date_invalid_${rec.id}`,
-          type: 'date_mismatch',
-          severity: 'high',
-          description: `Recording "${rec.filename}" has invalid date: ${rec.date_recorded}`,
-          filename: rec.filename,
-          recordingId: rec.id,
-          suggestedAction: 'manual',
-          autoRepairable: false,
-          details: { raw_date: rec.date_recorded }
-        })
-        continue
-      }
-
-      if (dateRecorded < minValidDate) {
-        issues.push({
-          id: `date_too_old_${rec.id}`,
-          type: 'date_mismatch',
-          severity: 'medium',
-          description: `Recording "${rec.filename}" has suspicious old date: ${dateRecorded.toISOString()}`,
-          filename: rec.filename,
-          recordingId: rec.id,
-          suggestedAction: 'repair',
-          autoRepairable: true,
-          details: {
-            recorded_date: dateRecorded.toISOString(),
-            suggested_date: rec.created_at // Use created_at as fallback
-          }
-        })
-      } else if (dateRecorded > maxValidDate) {
-        issues.push({
-          id: `date_future_${rec.id}`,
-          type: 'date_mismatch',
-          severity: 'medium',
-          description: `Recording "${rec.filename}" has future date: ${dateRecorded.toISOString()}`,
-          filename: rec.filename,
-          recordingId: rec.id,
-          suggestedAction: 'repair',
-          autoRepairable: true,
-          details: {
-            recorded_date: dateRecorded.toISOString(),
-            suggested_date: now.toISOString()
-          }
-        })
-      }
+      const issue = getRecordingSourceDateIssue(rec, now)
+      if (issue) issues.push(issue)
     }
 
     // 2. Scan recordings folder for files where mtime doesn't match filename date

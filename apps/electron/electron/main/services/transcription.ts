@@ -24,15 +24,34 @@ import {
   acquireTranscriptionLock,
   releaseTranscriptionLock,
   clearStaleTranscriptionLock,
-  type Transcript
+  startTranscriptionHistory,
+  finishTranscriptionHistory,
+  type Transcript,
+  type Recording
 } from './database'
 import { BrowserWindow } from 'electron'
 import { getVectorStore } from './vector-store'
+import { analyzeTranscriptWithOpenAI, transcribeAudioFileWithOpenAI } from './openai-transcription'
+import { chooseAutomaticMeetingLink } from './meeting-correlation'
 
 let mainWindow: BrowserWindow | null = null
 let isProcessing = false
 let processingInterval: ReturnType<typeof setInterval> | null = null
 let lastSkipLogAt = 0 // Throttle "skipping" spam to once per 60s
+
+export function buildTranscriptIndexMetadata(
+  recording: Pick<Recording, 'id' | 'date_recorded'>,
+  meetingId?: string,
+  subject?: string
+): { meetingId?: string; recordingId: string; timestamp: string; subject?: string } {
+  return {
+    meetingId,
+    recordingId: recording.id,
+    // This is source chronology, not the time the database row or transcript was created.
+    timestamp: recording.date_recorded,
+    subject
+  }
+}
 
 export function setMainWindowForTranscription(win: BrowserWindow): void {
   mainWindow = win
@@ -69,8 +88,10 @@ export function stopTranscriptionProcessor(): void {
 }
 
 let cancelRequested = false
+const activeTranscriptionControllers = new Map<string, AbortController>()
 
 export function cancelTranscription(recordingId: string): void {
+  activeTranscriptionControllers.get(recordingId)?.abort('Cancelled by user')
   removeFromQueueByRecordingId(recordingId)
   updateRecordingTranscriptionStatus(recordingId, 'none')
   notifyRenderer('transcription:cancelled', { recordingId })
@@ -78,6 +99,9 @@ export function cancelTranscription(recordingId: string): void {
 
 export function cancelAllTranscriptions(): number {
   cancelRequested = true
+  for (const controller of activeTranscriptionControllers.values()) {
+    controller.abort('Cancelled by user')
+  }
   const count = cancelPendingTranscriptions()
   notifyRenderer('transcription:all-cancelled', { count })
   // cancelRequested is reset at the end of processQueue (after the loop breaks)
@@ -105,8 +129,13 @@ async function processQueue(): Promise<void> {
   }
 
   const config = getConfig()
-  if (!config.transcription.geminiApiKey) {
-    console.error('[Transcription] Cannot process queue: Gemini API key not configured')
+  const provider = config.transcription.provider
+  const configuredApiKey = provider === 'openai'
+    ? config.transcription.openaiApiKey
+    : config.transcription.geminiApiKey
+  if (!configuredApiKey) {
+    const providerName = provider === 'openai' ? 'OpenAI' : 'Gemini'
+    console.error(`[Transcription] Cannot process queue: ${providerName} API key not configured`)
 
     // Mark all pending items as failed with clear error message
     const pendingItems = getQueueItems('pending')
@@ -117,12 +146,13 @@ async function processQueue(): Promise<void> {
       console.log(`[Transcription] Marking ${allStuckItems.length} stuck items as failed (no API key)`)
 
       for (const item of allStuckItems) {
-        updateQueueItem(item.id, 'failed', 'Gemini API key not configured. Please add your API key in Settings.')
+        const error = `${providerName} API key not configured. Please add your API key in Settings.`
+        updateQueueItem(item.id, 'failed', error)
         updateRecordingTranscriptionStatus(item.recording_id, 'error')
         notifyRenderer('transcription:failed', {
           queueItemId: item.id,
           recordingId: item.recording_id,
-          error: 'Gemini API key not configured. Please add your API key in Settings.'
+          error
         })
       }
     }
@@ -139,6 +169,9 @@ async function processQueue(): Promise<void> {
       'Recording not found',
       'Recording file not found',
       'Gemini API key not configured',
+      'OpenAI API key not configured',
+      'does not support the format',
+      'Bulk transcription cancelled',
       'no local file'
     ]
     const failedItems = getQueueItems('failed')
@@ -187,7 +220,23 @@ async function processQueue(): Promise<void> {
         break
       }
 
+      let historyId: string | undefined
+      const historyStartedAt = Date.now()
+      const controller = new AbortController()
+      activeTranscriptionControllers.set(item.recording_id, controller)
       try {
+        const transcriptionConfig = getConfig().transcription
+        const provider = transcriptionConfig.provider
+        const model = provider === 'openai'
+          ? transcriptionConfig.openaiTranscriptionModel
+          : transcriptionConfig.geminiModel
+        historyId = startTranscriptionHistory(
+          item.recording_id,
+          item.id,
+          provider,
+          model,
+          (item.attempts ?? 0) + 1
+        )
         updateQueueItem(item.id, 'processing')
         updateQueueProgress(item.id, 0) // spec-014: reset progress
         notifyRenderer('transcription:started', { queueItemId: item.id, recordingId: item.recording_id })
@@ -226,20 +275,38 @@ async function processQueue(): Promise<void> {
         }
 
         try {
-          await transcribeRecording(item.recording_id, progressCallback)
+          await transcribeRecording(item.recording_id, progressCallback, controller.signal)
         } finally {
           clearInterval(progressTicker) // Always clean up the ticker
         }
 
         updateQueueProgress(item.id, 100) // spec-014: mark complete
         updateQueueItem(item.id, 'completed')
-        notifyRenderer('transcription:completed', { queueItemId: item.id, recordingId: item.recording_id })
+        finishTranscriptionHistory(historyId, 'completed', Date.now() - historyStartedAt)
+        notifyRenderer('transcription:completed', {
+          queueItemId: item.id,
+          recordingId: item.recording_id,
+          provider: getConfig().transcription.provider
+        })
         const { emitActivityLog: emitDone } = await import('./activity-log')
         const recDone = getRecordingById(item.recording_id)
         emitDone('success', 'Transcription complete', recDone?.filename ?? item.recording_id)
       } catch (error) {
+        if (controller.signal.aborted) {
+          if (historyId) {
+            finishTranscriptionHistory(historyId, 'cancelled', Date.now() - historyStartedAt, 'Cancelled by user')
+          }
+          removeFromQueueByRecordingId(item.recording_id)
+          updateRecordingTranscriptionStatus(item.recording_id, 'none')
+          continue
+        }
+
         const errorMessage = error instanceof Error ? error.message : 'Unknown error'
         console.error('Transcription failed:', errorMessage)
+
+        if (historyId) {
+          finishTranscriptionHistory(historyId, 'failed', Date.now() - historyStartedAt, errorMessage)
+        }
 
         updateQueueItem(item.id, 'failed', errorMessage)
         // AI-13: Use standard enum value 'error' (not 'failed')
@@ -258,6 +325,8 @@ async function processQueue(): Promise<void> {
         if (retryCount >= MAX_RETRY_ATTEMPTS) {
           console.log(`Recording ${item.recording_id} failed after ${retryCount} retries (max: ${MAX_RETRY_ATTEMPTS})`)
         }
+      } finally {
+        activeTranscriptionControllers.delete(item.recording_id)
       }
     }
 
@@ -294,8 +363,8 @@ async function detectActionables(
   metadata: { title?: string; questions?: string[] }
 ): Promise<ActionableDetection[]> {
   const config = getConfig()
-  if (!config.transcription.geminiApiKey) {
-    console.log('[Actionable Detection] Gemini API key not configured, skipping')
+  if (config.transcription.provider !== 'gemini' || !config.transcription.geminiApiKey) {
+    console.log('[Actionable Detection] Gemini provider not configured, skipping')
     return []
   }
 
@@ -366,8 +435,10 @@ Only include detections with confidence >= 0.6.`
 
 async function transcribeRecording(
   recordingId: string,
-  progressCallback?: (stage: string, progress: number) => void
+  progressCallback?: (stage: string, progress: number) => void,
+  signal?: AbortSignal
 ): Promise<void> {
+  signal?.throwIfAborted()
   const recording = getRecordingById(recordingId)
   if (!recording || !recording.file_path) {
     throw new Error(`Recording not found or no local file: ${recordingId}`)
@@ -378,8 +449,12 @@ async function transcribeRecording(
   }
 
   const config = getConfig()
-  if (!config.transcription.geminiApiKey) {
-    throw new Error('Gemini API key not configured')
+  const provider = config.transcription.provider
+  const apiKey = provider === 'openai'
+    ? config.transcription.openaiApiKey
+    : config.transcription.geminiApiKey
+  if (!apiKey) {
+    throw new Error(`${provider === 'openai' ? 'OpenAI' : 'Gemini'} API key not configured`)
   }
 
   console.log(`Transcribing: ${recording.filename}`)
@@ -388,9 +463,9 @@ async function transcribeRecording(
 
   progressCallback?.('reading_file', 5) // spec-014: progress reporting
 
-  // Read the audio file asynchronously to avoid blocking the main process
-  const audioBuffer = await readFileAsync(recording.file_path)
-  const base64Audio = audioBuffer.toString('base64')
+  // Gemini requires the complete file in memory. OpenAI streams from disk and
+  // automatically chunks large recordings, avoiding a second large allocation.
+  const audioBuffer = provider === 'gemini' ? await readFileAsync(recording.file_path) : null
 
   // Determine MIME type
   const ext = extname(recording.file_path).toLowerCase()
@@ -404,9 +479,12 @@ async function transcribeRecording(
   }
   const mimeType = mimeTypes[ext] || 'audio/wav'
 
-  // Initialize Gemini
-  const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
-  const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-2.0-flash-exp' })
+  // Initialize Gemini only when it is the selected provider.
+  const geminiModel = provider === 'gemini'
+    ? new GoogleGenerativeAI(config.transcription.geminiApiKey).getGenerativeModel({
+        model: config.transcription.geminiModel || 'gemini-2.0-flash-exp'
+      })
+    : null
 
   // Find candidate meetings for this recording's time window
   const candidateMeetings = findCandidateMeetingsForRecording(recordingId)
@@ -435,18 +513,29 @@ If there are multiple speakers, try to indicate speaker changes with "Speaker 1:
 ${meetingContext}
 Return ONLY the transcription, no additional commentary.`
 
-  const transcriptionResult = await model.generateContent([
-    {
-      inlineData: {
+  const fullText = provider === 'openai'
+    ? await transcribeAudioFileWithOpenAI({
+        apiKey,
+        filePath: recording.file_path,
         mimeType,
-        data: base64Audio
-      }
-    },
-    { text: transcriptionPrompt }
-  ])
+        model: config.transcription.openaiTranscriptionModel || 'gpt-transcribe',
+        prompt: `Transcribe in the original language. Preserve names and technical terms.${meetingContext}`,
+        signal,
+        onProgress: (completed, total) => {
+          progressCallback?.('transcribing', 20 + Math.round((completed / total) * 28))
+        }
+      })
+    : (await geminiModel!.generateContent([
+        {
+          inlineData: {
+            mimeType,
+            data: audioBuffer!.toString('base64')
+          }
+        },
+        { text: transcriptionPrompt }
+      ])).response.text()
 
-  const fullText = transcriptionResult.response.text()
-
+  signal?.throwIfAborted()
   progressCallback?.('analyzing', 50) // spec-014: progress reporting
 
   // Build meeting selection prompt if there are multiple candidates
@@ -502,10 +591,6 @@ Respond in JSON format:
   "selection_reason": "..."` : ''}
 }`
 
-  const analysisResult = await model.generateContent(analysisPrompt)
-  const analysisText = analysisResult.response.text()
-
-  // Parse the analysis JSON
   let analysis: {
     summary?: string
     action_items?: string[]
@@ -514,41 +599,67 @@ Respond in JSON format:
     title_suggestion?: string
     question_suggestions?: string[]
     language?: string
-    selected_meeting_id?: string
+    selected_meeting_id?: string | null
     meeting_confidence?: number
     selection_reason?: string
   } = {}
 
-  try {
-    // Extract JSON from the response (might be wrapped in markdown code blocks)
-    const jsonMatch = analysisText.match(/\{[\s\S]*\}/)
-    if (jsonMatch) {
-      analysis = JSON.parse(jsonMatch[0])
+  if (provider === 'openai') {
+    analysis = await analyzeTranscriptWithOpenAI({
+      apiKey,
+      model: config.transcription.openaiAnalysisModel || 'gpt-6-luna',
+      prompt: analysisPrompt,
+      signal
+    })
+  } else {
+    const analysisResult = await geminiModel!.generateContent(analysisPrompt)
+    const analysisText = analysisResult.response.text()
+
+    try {
+      // Extract JSON from the response (might be wrapped in markdown code blocks)
+      const jsonMatch = analysisText.match(/\{[\s\S]*\}/)
+      if (jsonMatch) {
+        analysis = JSON.parse(jsonMatch[0])
+      }
+    } catch (e) {
+      console.warn('Failed to parse analysis JSON:', e)
+      analysis = { summary: 'Analysis failed', language: 'unknown' }
     }
-  } catch (e) {
-    console.warn('Failed to parse analysis JSON:', e)
-    analysis = { summary: 'Analysis failed', language: 'unknown' }
   }
 
+  signal?.throwIfAborted()
+
   // Process AI meeting selection
+  let automaticMeetingId: string | null = null
   if (candidateMeetings.length > 0) {
+    automaticMeetingId = chooseAutomaticMeetingLink({
+      existingMeetingId: recording.meeting_id,
+      existingCorrelationMethod: recording.correlation_method,
+      selectedMeetingId: analysis.selected_meeting_id,
+      confidence: analysis.meeting_confidence,
+      candidateMeetingIds: candidateMeetings.map((meeting) => meeting.id)
+    })
+
     // Add all candidates to the database
     for (const meeting of candidateMeetings) {
-      const isSelected = analysis.selected_meeting_id === meeting.id
-      const confidence = isSelected ? (analysis.meeting_confidence || 0.5) : 0.1
-      const reason = isSelected ? (analysis.selection_reason || 'Time overlap') : 'Time overlap only'
+      const isAutomaticallyLinked = automaticMeetingId === meeting.id
+      const confidence = analysis.selected_meeting_id === meeting.id ? (analysis.meeting_confidence || 0) : 0.1
+      const reason = analysis.selected_meeting_id === meeting.id
+        ? (analysis.selection_reason || 'Transcript analysis')
+        : 'Time overlap only'
 
-      addRecordingMeetingCandidate(recordingId, meeting.id, confidence, reason, isSelected)
+      addRecordingMeetingCandidate(recordingId, meeting.id, confidence, reason, isAutomaticallyLinked)
     }
 
-    // If AI selected a meeting, link it
-    if (analysis.selected_meeting_id) {
-      const selectedMeeting = candidateMeetings.find(m => m.id === analysis.selected_meeting_id)
+    // Only a valid, high-confidence candidate may be linked automatically.
+    // Manual links and explicit "standalone" decisions are never overwritten.
+    if (automaticMeetingId) {
+      const selectedMeeting = candidateMeetings.find(m => m.id === automaticMeetingId)
       if (selectedMeeting) {
         linkRecordingToMeeting(
           recordingId,
           selectedMeeting.id,
-          analysis.meeting_confidence || 0.5,
+          analysis.meeting_confidence!,
           'ai_transcript_match'
         )
         console.log(`AI matched recording to meeting: "${selectedMeeting.subject}" (confidence: ${analysis.meeting_confidence})`)
@@ -572,8 +683,10 @@ Respond in JSON format:
     sentiment: undefined,
     speakers: undefined,
     word_count: wordCount,
-    transcription_provider: 'gemini',
-    transcription_model: config.transcription.geminiModel,
+    transcription_provider: provider,
+    transcription_model: provider === 'openai'
+      ? config.transcription.openaiTranscriptionModel
+      : config.transcription.geminiModel,
     title_suggestion: analysis.title_suggestion,
     question_suggestions: analysis.question_suggestions ? JSON.stringify(analysis.question_suggestions) : undefined
   }
@@ -645,8 +758,9 @@ Respond in JSON format:
   // Index transcript into vector store for RAG
   try {
     const vectorStore = getVectorStore()
-    // Use the AI-linked meeting ID if available, otherwise fall back to the original
-    const meetingId = analysis.selected_meeting_id || recording.meeting_id
+    // Index only against a link that passed policy (or a pre-existing link),
+    // never against an unconfirmed low-confidence suggestion.
+    const meetingId = automaticMeetingId || recording.meeting_id
     let meetingSubject: string | undefined
 
     if (meetingId) {
@@ -654,12 +768,10 @@ Respond in JSON format:
       meetingSubject = meeting?.subject
     }
 
-    const indexedCount = await vectorStore.indexTranscript(fullText, {
-      meetingId: meetingId || undefined,
-      recordingId,
-      timestamp: recording.created_at,
-      subject: meetingSubject
-    })
+    const indexedCount = await vectorStore.indexTranscript(
+      fullText,
+      buildTranscriptIndexMetadata(recording, meetingId || undefined, meetingSubject)
+    )
 
     console.log(`Indexed ${indexedCount} chunks into vector store`)
   } catch (e) {

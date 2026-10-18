@@ -69,9 +69,12 @@ export function RecordingLinkDialog({
       setLinkError(null)
 
       try {
+        const hasSourceDate = Number.isFinite(new Date(recording.date_recorded).getTime())
         const promises: Promise<any>[] = [
           window.electronAPI.recordings.getCandidates(recording.id),
-          window.electronAPI.recordings.getMeetingsNearDate(recording.date_recorded)
+          hasSourceDate
+            ? window.electronAPI.recordings.getMeetingsNearDate(recording.date_recorded)
+            : Promise.resolve({ success: true, data: [] })
         ]
         if (meeting) {
           promises.push(window.electronAPI.recordings.getForMeeting(meeting.id))

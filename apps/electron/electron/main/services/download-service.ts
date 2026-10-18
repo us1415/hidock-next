@@ -30,6 +30,8 @@ import { emitActivityLog } from './activity-log'
 import { existsSync } from 'fs'
 import { join, basename } from 'path'
 
+const MAX_AUTOMATIC_QUEUE_RESTORE = 20
+
 // Download queue item
 // C-004: Added 'cancelled' status to distinguish user cancellations from actual failures
 export interface DownloadQueueItem {
@@ -80,7 +82,26 @@ class DownloadService {
   constructor() {
     console.log('[DownloadService] Initialized')
     this.loadQueueFromDatabase()
+    this.cancelUnexpectedBulkRestore()
     this.startStalledCheckInterval() // spec-007: start periodic timeout detection
+  }
+
+  /**
+   * A persisted queue can otherwise resume hundreds of transfers immediately
+   * after a restart. Large batches must be deliberately selected again.
+   */
+  private cancelUnexpectedBulkRestore(): void {
+    if (this.state.queue.size <= MAX_AUTOMATIC_QUEUE_RESTORE) return
+
+    const count = this.state.queue.size
+    run(
+      `UPDATE download_queue
+       SET status = 'failed', error = 'Bulk queue paused for manual selection'
+       WHERE status IN ('pending', 'downloading')`
+    )
+    this.state.queue.clear()
+    this.markDirty()
+    console.warn(`[DownloadService] Cancelled automatic restore of ${count} queued downloads`)
   }
 
   /**
@@ -151,7 +172,8 @@ class DownloadService {
       }>(`
         SELECT id, filename, file_size, progress, status, error, started_at, completed_at, recording_date
         FROM download_queue
-        WHERE status IN ('pending', 'downloading')
+        WHERE status IN ('pending', 'downloading', 'failed', 'cancelled')
+          AND COALESCE(error, '') != 'Bulk queue paused for manual selection'
         ORDER BY created_at ASC
       `)
 
@@ -271,10 +293,14 @@ class DownloadService {
   /**
    * Get files that need to be synced from a list
    */
-  getFilesToSync(deviceFiles: Array<{ filename: string; size: number; duration: number; dateCreated: Date }>): Array<{ filename: string; size: number; duration: number; dateCreated: Date; skipReason?: string }> {
-    const results: Array<{ filename: string; size: number; duration: number; dateCreated: Date; skipReason?: string }> = []
+  getFilesToSync(deviceFiles: Array<{ filename: string; size: number; duration: number; dateCreated: Date | null }>): Array<{ filename: string; size: number; duration: number; dateCreated: Date | null; skipReason?: string }> {
+    const results: Array<{ filename: string; size: number; duration: number; dateCreated: Date | null; skipReason?: string }> = []
 
     for (const file of deviceFiles) {
+      if (!file.dateCreated || Number.isNaN(file.dateCreated.getTime())) {
+        results.push({ ...file, skipReason: 'Original recording date is unknown; review required' })
+        continue
+      }
       const { synced, reason } = this.isFileAlreadySynced(file.filename)
       if (synced) {
         console.log(`[DownloadService] Skipping ${file.filename}: ${reason}`)
@@ -436,12 +462,16 @@ class DownloadService {
 
       // Update database
       const wavFilename = filename.replace(/\.hda$/i, '.wav')
+      const mp3Filename = DownloadService.normalizeFilename(filename)
       addSyncedFile(filename, basename(filePath), filePath, data.length)
       markRecordingDownloaded(filename, filePath)
 
       // Also try to mark by wav name if different
       if (wavFilename !== filename) {
         markRecordingDownloaded(wavFilename, filePath)
+      }
+      if (mp3Filename !== filename) {
+        markRecordingDownloaded(mp3Filename, filePath)
       }
 
       // Update queue item
@@ -981,27 +1011,36 @@ export function registerDownloadServiceHandlers(): void {
   })
 
   // Get files to sync from a list
-  ipcMain.handle('download-service:get-files-to-sync', (_, files: Array<{ filename: string; size: number; duration: number; dateCreated: Date }>) => {
-    return service.getFilesToSync(files)
+  ipcMain.handle('download-service:get-files-to-sync', (_, files: Array<{ filename: string; size: number; duration: number; dateCreated: string | Date | null }>) => {
+    return service.getFilesToSync(files.map((file) => ({
+      ...file,
+      dateCreated: file.dateCreated ? new Date(file.dateCreated) : null
+    })))
   })
 
   // Queue downloads (with optional dateCreated for preserving original recording dates)
-  ipcMain.handle('download-service:queue-downloads', (_, files: Array<{ filename: string; size: number; dateCreated?: string }>) => {
+  ipcMain.handle('download-service:queue-downloads', (_, files: Array<{ filename: string; size: number; dateCreated?: string | null }>) => {
     // Convert ISO date strings back to Date objects
-    const filesWithDates = files.map(f => ({
-      ...f,
-      dateCreated: f.dateCreated ? new Date(f.dateCreated) : undefined
-    }))
+    const filesWithDates = files.flatMap((file) => {
+      if (!file.dateCreated) {
+        console.warn(`[DownloadService] Refusing to queue ${file.filename}: original recording date is unknown`)
+        return []
+      }
+      return [{ ...file, dateCreated: new Date(file.dateCreated) }]
+    })
     return service.queueDownloads(filesWithDates)
   })
 
   // Start sync session (with optional dateCreated for preserving original recording dates)
-  ipcMain.handle('download-service:start-session', (_, files: Array<{ filename: string; size: number; dateCreated?: string }>) => {
+  ipcMain.handle('download-service:start-session', (_, files: Array<{ filename: string; size: number; dateCreated?: string | null }>) => {
     // Convert ISO date strings back to Date objects
-    const filesWithDates = files.map(f => ({
-      ...f,
-      dateCreated: f.dateCreated ? new Date(f.dateCreated) : undefined
-    }))
+    const filesWithDates = files.flatMap((file) => {
+      if (!file.dateCreated) {
+        console.warn(`[DownloadService] Refusing to queue ${file.filename}: original recording date is unknown`)
+        return []
+      }
+      return [{ ...file, dateCreated: new Date(file.dateCreated) }]
+    })
     return service.startSyncSession(filesWithDates)
   })
 

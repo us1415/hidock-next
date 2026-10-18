@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { AudioPlayer } from '@/components/AudioPlayer'
-import { formatDateTime, formatDuration } from '@/lib/utils'
+import { formatDateTime, formatDuration, formatSourceDateTime } from '@/lib/utils'
 import { parseJsonArray } from '@/types'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { useLibraryStore } from '@/store/useLibraryStore'
@@ -133,7 +133,10 @@ export function SourceDetailDrawer({
             </SheetTitle>
           </div>
           <SheetDescription id="source-detail-description">
-            {formatDateTime(source.dateRecorded.toISOString())}
+            {formatSourceDateTime(
+              source.sourceDateValue ?? source.dateRecorded?.toISOString(),
+              source.sourceDatePrecision
+            )}
             {source.size && ` • ${formatBytes(source.size)}`}
             {source.duration && ` • ${formatDuration(source.duration)}`}
           </SheetDescription>
@@ -419,7 +422,12 @@ export function SourceDetailDrawer({
                 )}
                 <div>
                   <dt className="text-xs font-medium text-muted-foreground">Recorded</dt>
-                  <dd className="mt-1">{formatDateTime(source.dateRecorded.toISOString())}</dd>
+                  <dd className="mt-1">
+                    {formatSourceDateTime(
+                      source.sourceDateValue ?? source.dateRecorded?.toISOString(),
+                      source.sourceDatePrecision
+                    )}
+                  </dd>
                 </div>
                 {transcript.language && (
                   <div>
