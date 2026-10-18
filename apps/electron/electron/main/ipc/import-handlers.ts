@@ -13,6 +13,13 @@ import {
   type ReconciliationDeviceFile
 } from '../services/otter-reconciliation'
 import {
+  applyOtterCanonicalMerge,
+  buildOtterCanonicalMergePlan,
+  OTTER_CANONICAL_MERGE_CONFIRMATION,
+  type OtterCanonicalMergeInventory,
+  type OtterCanonicalMergePlan
+} from '../services/otter-canonical-merge'
+import {
   getWatcherStatus,
   startRecordingWatcher,
   stopRecordingWatcher
@@ -31,34 +38,112 @@ function getExistingOtterCandidates(): ExistingOtterCandidate[] {
   }))
 }
 
+async function getOtterReconciliationPreview() {
+  const deviceFiles = queryAll<ReconciliationDeviceFile>(
+    'SELECT filename, size, duration, dateCreated FROM device_file_cache ORDER BY dateCreated'
+  )
+  const reviews = queryAll<OtterReconciliationReview>(`
+    SELECT
+      imported_recording_id AS importedRecordingId,
+      device_filename AS deviceFilename,
+      decision,
+      match_method AS matchMethod,
+      reviewed_at AS reviewedAt
+    FROM otter_reconciliation_reviews
+  `)
+  return buildOtterReconciliationPreview(
+    getRecordings(),
+    deviceFiles,
+    undefined,
+    new Date().toISOString(),
+    reviews
+  )
+}
+
+function getOtterCanonicalMergeInventory(): OtterCanonicalMergeInventory {
+  return {
+    transcriptRecordingIds: new Set(
+      queryAll<{ recording_id: string }>('SELECT recording_id FROM transcripts').map((row) => row.recording_id)
+    ),
+    captureRecordingIds: new Set(
+      queryAll<{ source_recording_id: string }>(
+        'SELECT source_recording_id FROM knowledge_captures WHERE source_recording_id IS NOT NULL'
+      ).map((row) => row.source_recording_id)
+    ),
+    qualityRecordingIds: new Set(
+      queryAll<{ recording_id: string }>('SELECT recording_id FROM quality_assessments').map((row) => row.recording_id)
+    )
+  }
+}
+
+async function getOtterCanonicalMergePlan(): Promise<OtterCanonicalMergePlan> {
+  const preview = await getOtterReconciliationPreview()
+  return buildOtterCanonicalMergePlan(preview, getRecordings(), getOtterCanonicalMergeInventory())
+}
+
 export function registerImportHandlers(): void {
   ipcMain.handle('imports:preview-otter-reconciliation', async () => {
     try {
-      const deviceFiles = queryAll<ReconciliationDeviceFile>(
-        'SELECT filename, size, duration, dateCreated FROM device_file_cache ORDER BY dateCreated'
-      )
-      const reviews = queryAll<OtterReconciliationReview>(`
-        SELECT
-          imported_recording_id AS importedRecordingId,
-          device_filename AS deviceFilename,
-          decision,
-          match_method AS matchMethod,
-          reviewed_at AS reviewedAt
-        FROM otter_reconciliation_reviews
-      `)
-      const preview = await buildOtterReconciliationPreview(
-        getRecordings(),
-        deviceFiles,
-        undefined,
-        new Date().toISOString(),
-        reviews
-      )
+      const preview = await getOtterReconciliationPreview()
       return { success: true, preview }
     } catch (error) {
       console.error('imports:preview-otter-reconciliation error:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : 'The Otter-to-HiDock reconciliation preview failed.'
+      }
+    }
+  })
+
+  ipcMain.handle('imports:preview-otter-canonical-merge', async () => {
+    try {
+      const plan = await getOtterCanonicalMergePlan()
+      return { success: true, plan }
+    } catch (error) {
+      console.error('imports:preview-otter-canonical-merge error:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'The canonical merge dry run failed.'
+      }
+    }
+  })
+
+  ipcMain.handle('imports:apply-otter-canonical-merge', async (_, value: unknown) => {
+    const request = value && typeof value === 'object' ? value as Record<string, unknown> : null
+    if (!request || request.confirmation !== OTTER_CANONICAL_MERGE_CONFIRMATION ||
+        typeof request.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(request.fingerprint)) {
+      return { success: false, error: 'The canonical merge confirmation is invalid.' }
+    }
+
+    try {
+      const plan = await getOtterCanonicalMergePlan()
+      if (!plan.ready) return { success: false, error: 'The canonical merge dry run has blockers.', plan }
+      if (plan.fingerprint !== request.fingerprint) {
+        return { success: false, error: 'The library changed after the dry run. Generate a new plan before merging.' }
+      }
+
+      saveDatabase()
+      const safetyParent = join(getDataPath(), 'merge-safety')
+      mkdirSync(safetyParent, { recursive: true })
+      const safetyBackup = await createPortableBackup(safetyParent)
+      const watcherWasRunning = getWatcherStatus().isWatching
+      if (watcherWasRunning) stopRecordingWatcher()
+      try {
+        const result = applyOtterCanonicalMerge(
+          plan,
+          getRecordings(),
+          safetyBackup.backupPath,
+          join(getDataPath(), 'reconciliation-archive')
+        )
+        return { success: true, result }
+      } finally {
+        if (watcherWasRunning) startRecordingWatcher()
+      }
+    } catch (error) {
+      console.error('imports:apply-otter-canonical-merge error:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'The canonical merge failed.'
       }
     }
   })

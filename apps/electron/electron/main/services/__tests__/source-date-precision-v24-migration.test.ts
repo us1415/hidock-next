@@ -87,10 +87,17 @@ describe('schema v24 source-date precision migration', () => {
     expect(migrated?.source_date_evidence).toBeNull()
 
     const version = database.getDatabase().exec('SELECT MAX(version) FROM schema_version')
-    expect(version[0].values[0][0]).toBe(25)
+    expect(version[0].values[0][0]).toBe(26)
     const reviewTable = database.getDatabase().exec(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'otter_reconciliation_reviews'"
     )
     expect(reviewTable[0].values[0][0]).toBe('otter_reconciliation_reviews')
+    const mergeTables = database.getDatabase().exec(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'otter_reconciliation_merge_%' ORDER BY name"
+    )
+    expect(mergeTables[0].values.map((row) => row[0])).toEqual([
+      'otter_reconciliation_merge_audit',
+      'otter_reconciliation_merge_batches'
+    ])
   })
 })

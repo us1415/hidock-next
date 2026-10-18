@@ -23,7 +23,9 @@ function getJson(url) {
 
 async function main() {
   const missingOnly = process.argv.includes('--missing-only')
-  const full = process.argv.includes('--full') || missingOnly
+  const conflictsOnly = process.argv.includes('--canonical-conflicts-only')
+  const canonicalPlanOnly = process.argv.includes('--canonical-plan')
+  const full = process.argv.includes('--full') || missingOnly || conflictsOnly
   const pages = await getJson('http://127.0.0.1:9222/json/list')
   const page = pages.find((candidate) => candidate.type === 'page' && candidate.url.includes('localhost:5173'))
   if (!page) throw new Error('HiDock Electron renderer was not found on the debug port.')
@@ -36,11 +38,18 @@ async function main() {
         id: 1,
         method: 'Runtime.evaluate',
         params: {
-          expression: full
+          expression: canonicalPlanOnly
+            ? 'window.electronAPI.imports.previewOtterCanonicalMerge()'
+            : full
             ? `Promise.all([
                 window.electronAPI.imports.previewOtterReconciliation(),
-                window.electronAPI.recordings.getAll()
-              ]).then(([previewResult, recordings]) => ({ previewResult, recordings }))`
+                window.electronAPI.recordings.getAll(),
+                window.electronAPI.knowledge.getAll({ limit: 5000 })
+              ]).then(([previewResult, recordings, knowledgeCaptures]) => ({
+                previewResult,
+                recordings,
+                knowledgeCaptures
+              }))`
             : 'window.electronAPI.imports.previewOtterReconciliation()',
           awaitPromise: true,
           returnByValue: true
@@ -59,9 +68,26 @@ async function main() {
 
   if (response.error) throw new Error(JSON.stringify(response.error))
   const value = response.result?.result?.value
+  if (canonicalPlanOnly) {
+    if (!value?.success) throw new Error(value?.error || 'The canonical merge dry run failed.')
+    console.log(JSON.stringify({
+      generatedAt: value.plan.generatedAt,
+      previewGeneratedAt: value.plan.previewGeneratedAt,
+      policy: value.plan.policy,
+      fingerprint: value.plan.fingerprint,
+      ready: value.plan.ready,
+      counts: value.plan.counts,
+      consolidations: value.plan.actions.filter((action) => action.kind === 'consolidate-existing'),
+      blockers: value.plan.blockers
+    }, null, 2))
+    return
+  }
   const result = full ? value?.previewResult : value
   if (!result?.success) throw new Error(result?.error || 'The reconciliation preview failed.')
   const recordingsById = new Map((full ? value.recordings : []).map((recording) => [recording.id, recording]))
+  const capturesByRecordingId = new Map(
+    (full ? value.knowledgeCaptures : []).map((capture) => [capture.sourceRecordingId, capture])
+  )
   const unresolved = result.preview.unresolved.map((item) => {
     const recording = recordingsById.get(item.importedRecordingId)
     const nearestDifference = item.nearestCandidates[0]?.durationDifferenceSeconds ?? null
@@ -81,6 +107,30 @@ async function main() {
     return counts
   }, {})
   const matchesByImportId = new Map(result.preview.matches.map((match) => [match.importedRecordingId, match]))
+  const recordingsByFilename = new Map(
+    [...recordingsById.values()].map((recording) => [recording.filename, recording])
+  )
+  const baseName = (filename) => filename.replace(/\.[^.]+$/, '').toLowerCase()
+  const recordingsByBase = new Map(
+    [...recordingsById.values()].map((recording) => [baseName(recording.filename), recording])
+  )
+  const canonicalTargetConflicts = result.preview.matches.flatMap((match) => {
+    const target = recordingsByFilename.get(match.deviceFilename) || recordingsByBase.get(baseName(match.deviceFilename))
+    if (!target || target.id === match.importedRecordingId) return []
+    const imported = recordingsById.get(match.importedRecordingId)
+    return [{
+      importedRecordingId: match.importedRecordingId,
+      importedFilename: match.importedFilename,
+      importedTranscriptionStatus: imported?.transcription_status ?? null,
+      deviceFilename: match.deviceFilename,
+      targetRecordingId: target.id,
+      targetTranscriptionStatus: target.transcription_status,
+      importedCaptureId: capturesByRecordingId.get(match.importedRecordingId)?.id ?? null,
+      targetCaptureId: capturesByRecordingId.get(target.id)?.id ?? null,
+      targetLocalPath: target.file_path,
+      targetMeetingId: target.meeting_id ?? null
+    }]
+  })
   const missingTranscripts = [...recordingsById.values()]
     .filter((recording) => recording.is_imported === 1 && recording.source === 'import')
     .filter((recording) => recording.transcription_status !== 'complete')
@@ -117,6 +167,10 @@ async function main() {
       })(),
       proposedMatch: matchesByImportId.get(recording.id) || null
     }))
+  if (conflictsOnly) {
+    console.log(JSON.stringify({ count: canonicalTargetConflicts.length, items: canonicalTargetConflicts }, null, 2))
+    return
+  }
   if (missingOnly) {
     const totalSeconds = missingTranscripts.reduce((sum, item) => sum + (item.durationSeconds || 0), 0)
     console.log(JSON.stringify({
@@ -136,6 +190,7 @@ async function main() {
       ? result.preview.matches.filter((match) => match.method === 'adjacent-date-duration')
       : undefined,
     classificationCounts: full ? classificationCounts : undefined,
+    canonicalTargetConflicts: full ? canonicalTargetConflicts : undefined,
     missingTranscripts: full ? missingTranscripts : undefined,
     unresolved: full ? unresolved : unresolved.slice(0, 5)
   }, null, 2))

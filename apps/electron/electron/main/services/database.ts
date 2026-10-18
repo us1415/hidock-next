@@ -7,7 +7,7 @@ import { buildRecordingMeetingWindow } from './meeting-correlation'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 25
+const SCHEMA_VERSION = 26
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -485,6 +485,38 @@ CREATE TABLE IF NOT EXISTS otter_reconciliation_reviews (
     FOREIGN KEY (imported_recording_id) REFERENCES recordings(id) ON DELETE CASCADE
 );
 
+-- Reversible audit trail for canonical Otter-to-HiDock merges (v26)
+CREATE TABLE IF NOT EXISTS otter_reconciliation_merge_batches (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK(status IN ('applied', 'reverted')),
+    policy TEXT NOT NULL,
+    plan_fingerprint TEXT NOT NULL,
+    preview_generated_at TEXT NOT NULL,
+    backup_path TEXT,
+    plan_json TEXT NOT NULL,
+    applied_at TEXT NOT NULL,
+    reverted_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS otter_reconciliation_merge_audit (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    recording_id TEXT NOT NULL,
+    canonical_recording_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('canonicalized', 'kept-separate')),
+    device_filename TEXT,
+    match_method TEXT,
+    before_recording_json TEXT,
+    after_recording_json TEXT,
+    before_review_json TEXT,
+    archived_audio_path TEXT,
+    status TEXT NOT NULL CHECK(status IN ('applied', 'reverted')),
+    applied_at TEXT NOT NULL,
+    reverted_at TEXT,
+    FOREIGN KEY (batch_id) REFERENCES otter_reconciliation_merge_batches(id) ON DELETE CASCADE,
+    UNIQUE(batch_id, recording_id)
+);
+
 -- Quality assessments for recordings (v10)
 CREATE TABLE IF NOT EXISTS quality_assessments (
     id TEXT PRIMARY KEY,
@@ -503,6 +535,8 @@ CREATE INDEX IF NOT EXISTS idx_device_cache_filename ON device_files_cache(filen
 CREATE INDEX IF NOT EXISTS idx_device_cache_date ON device_files_cache(date_recorded);
 CREATE INDEX IF NOT EXISTS idx_device_review_status ON device_review_queue(device_id, status, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_otter_reconciliation_decision ON otter_reconciliation_reviews(decision, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_otter_merge_batch_status ON otter_reconciliation_merge_batches(status, applied_at DESC);
+CREATE INDEX IF NOT EXISTS idx_otter_merge_audit_batch ON otter_reconciliation_merge_audit(batch_id, status);
 
 CREATE INDEX IF NOT EXISTS idx_meetings_start_time ON meetings(start_time);
 CREATE INDEX IF NOT EXISTS idx_recordings_date ON recordings(date_recorded);
@@ -1342,6 +1376,51 @@ const MIGRATIONS: Record<number, () => void> = {
     database.run(
       'CREATE INDEX IF NOT EXISTS idx_otter_reconciliation_decision ' +
       'ON otter_reconciliation_reviews(decision, updated_at DESC)'
+    )
+  },
+  26: () => {
+    console.log('Running migration to schema v26: Adding reversible Otter canonical merge audit')
+    const database = getDatabase()
+    database.run(`
+      CREATE TABLE IF NOT EXISTS otter_reconciliation_merge_batches (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL CHECK(status IN ('applied', 'reverted')),
+        policy TEXT NOT NULL,
+        plan_fingerprint TEXT NOT NULL,
+        preview_generated_at TEXT NOT NULL,
+        backup_path TEXT,
+        plan_json TEXT NOT NULL,
+        applied_at TEXT NOT NULL,
+        reverted_at TEXT
+      )
+    `)
+    database.run(`
+      CREATE TABLE IF NOT EXISTS otter_reconciliation_merge_audit (
+        id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL,
+        recording_id TEXT NOT NULL,
+        canonical_recording_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK(action IN ('canonicalized', 'kept-separate')),
+        device_filename TEXT,
+        match_method TEXT,
+        before_recording_json TEXT,
+        after_recording_json TEXT,
+        before_review_json TEXT,
+        archived_audio_path TEXT,
+        status TEXT NOT NULL CHECK(status IN ('applied', 'reverted')),
+        applied_at TEXT NOT NULL,
+        reverted_at TEXT,
+        FOREIGN KEY (batch_id) REFERENCES otter_reconciliation_merge_batches(id) ON DELETE CASCADE,
+        UNIQUE(batch_id, recording_id)
+      )
+    `)
+    database.run(
+      'CREATE INDEX IF NOT EXISTS idx_otter_merge_batch_status ' +
+      'ON otter_reconciliation_merge_batches(status, applied_at DESC)'
+    )
+    database.run(
+      'CREATE INDEX IF NOT EXISTS idx_otter_merge_audit_batch ' +
+      'ON otter_reconciliation_merge_audit(batch_id, status)'
     )
   }
 

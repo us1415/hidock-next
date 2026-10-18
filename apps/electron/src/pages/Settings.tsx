@@ -39,6 +39,9 @@ type OtterImportPreview = NonNullable<
 type OtterReconciliationPreview = NonNullable<
   Awaited<ReturnType<Window['electronAPI']['imports']['previewOtterReconciliation']>>['preview']
 >
+type OtterCanonicalMergePlan = NonNullable<
+  Awaited<ReturnType<Window['electronAPI']['imports']['previewOtterCanonicalMerge']>>['plan']
+>
 type ReconciliationDecision = OtterReconciliationPreview['matches'][number]['reviewDecision']
 type ReconciliationView = 'matches' | 'unresolved'
 type ReconciliationMethod = 'all' | OtterReconciliationPreview['matches'][number]['method']
@@ -77,6 +80,7 @@ export function Settings() {
   const [reconciliationMethod, setReconciliationMethod] = useState<ReconciliationMethod>('all')
   const [reconciliationSearch, setReconciliationSearch] = useState('')
   const [reconciliationPage, setReconciliationPage] = useState(0)
+  const [canonicalMergePlan, setCanonicalMergePlan] = useState<OtterCanonicalMergePlan | null>(null)
   const [localSearchStatus, setLocalSearchStatus] = useState<'checking' | 'ready' | 'offline'>('checking')
   // C-CHAT: RAG context window — default matches config.ts (10)
   const [ragContextSize, setRagContextSize] = useState<number>(RAG_DEFAULTS.MAX_CONTEXT_CHUNKS)
@@ -485,6 +489,34 @@ export function Settings() {
       toast.error(
         'Review plan not saved',
         error instanceof Error ? error.message : 'Could not save reconciliation decisions.'
+      )
+    } finally {
+      setReconciliationBusy(false)
+    }
+  }
+
+  const handleCanonicalMergeDryRun = async () => {
+    setReconciliationBusy(true)
+    try {
+      const result = await window.electronAPI.imports.previewOtterCanonicalMerge()
+      if (!result.success || !result.plan) {
+        toast.error('Canonical merge dry run failed', result.error || 'No merge plan was returned.')
+        return
+      }
+      setCanonicalMergePlan(result.plan)
+      if (result.plan.ready) {
+        toast.success(
+          'Canonical merge dry run ready',
+          `${result.plan.counts.proposedAccepted} matches can be merged; ` +
+          `${result.plan.counts.unresolvedKeptSeparate} will remain separate.`
+        )
+      } else {
+        toast.warning('Canonical merge dry run has blockers', `${result.plan.counts.blockers} blockers require attention.`)
+      }
+    } catch (error) {
+      toast.error(
+        'Canonical merge dry run failed',
+        error instanceof Error ? error.message : 'Could not build the canonical merge plan.'
       )
     } finally {
       setReconciliationBusy(false)
@@ -1475,6 +1507,51 @@ export function Settings() {
                               Saving records review decisions only. It does not merge or modify audio, transcripts,
                               titles, filenames, source dates, or speaker data.
                             </p>
+                          </div>
+                          <div className="space-y-3 rounded-md border border-blue-200 bg-blue-50/60 p-3 dark:border-blue-900 dark:bg-blue-950/20">
+                            <div>
+                              <p className="text-sm font-medium">Canonical merge dry run</p>
+                              <p className="text-xs text-muted-foreground">
+                                Accepts every proposed match and keeps every unresolved conversation separate. This
+                                check is read-only and cannot apply the merge.
+                              </p>
+                            </div>
+                            <Button
+                              variant="outline"
+                              onClick={handleCanonicalMergeDryRun}
+                              disabled={reconciliationBusy || backupBusy || otterBusy}
+                            >
+                              <ShieldCheck className="h-4 w-4 mr-2" />
+                              {reconciliationBusy ? 'Checking merge plan...' : 'Run Canonical Merge Dry Run'}
+                            </Button>
+                            {canonicalMergePlan && (
+                              <div className="space-y-2 text-xs" aria-label="Canonical merge dry run result">
+                                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                                  <div><p className="font-semibold">{canonicalMergePlan.counts.proposedAccepted}</p><p>Accepted matches</p></div>
+                                  <div><p className="font-semibold">{canonicalMergePlan.counts.canonicalizeImported}</p><p>Canonicalize in place</p></div>
+                                  <div><p className="font-semibold">{canonicalMergePlan.counts.consolidateExisting}</p><p>Existing HiDock rows</p></div>
+                                  <div><p className="font-semibold">{canonicalMergePlan.counts.unresolvedKeptSeparate}</p><p>Keep separate</p></div>
+                                  <div><p className="font-semibold">{canonicalMergePlan.counts.preDevicePreserved}</p><p>Pre-device preserved</p></div>
+                                  <div>
+                                    <p className={canonicalMergePlan.ready ? 'font-semibold text-green-700 dark:text-green-400' : 'font-semibold text-red-700 dark:text-red-400'}>
+                                      {canonicalMergePlan.counts.blockers}
+                                    </p>
+                                    <p>Blockers</p>
+                                  </div>
+                                </div>
+                                <p className="font-medium">
+                                  {canonicalMergePlan.ready
+                                    ? 'Ready for backup and explicit execution approval.'
+                                    : 'Not ready to execute. Resolve every blocker and run the dry check again.'}
+                                </p>
+                                {canonicalMergePlan.blockers.length > 0 && (
+                                  <ul className="list-disc space-y-1 pl-5 text-red-700 dark:text-red-400">
+                                    {canonicalMergePlan.blockers.slice(0, 10).map((blocker) => <li key={blocker}>{blocker}</li>)}
+                                  </ul>
+                                )}
+                                <p className="text-muted-foreground">Plan fingerprint: {canonicalMergePlan.fingerprint.slice(0, 16)}…</p>
+                              </div>
+                            )}
                           </div>
                         </div>
                       )}

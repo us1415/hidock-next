@@ -41,6 +41,27 @@ const mockPreviewOtter = vi.fn().mockResolvedValue({
 })
 const mockCommitOtter = vi.fn()
 const mockSaveOtterReconciliationReviews = vi.fn().mockResolvedValue({ success: true, saved: 2 })
+const mockPreviewOtterCanonicalMerge = vi.fn().mockResolvedValue({
+  success: true,
+  plan: {
+    generatedAt: '2026-10-18T18:05:00.000Z',
+    previewGeneratedAt: '2026-10-18T18:00:00.000Z',
+    policy: 'accept-proposed-keep-unresolved-separate-v1',
+    fingerprint: 'a'.repeat(64),
+    ready: true,
+    counts: {
+      proposedAccepted: 379,
+      canonicalizeImported: 373,
+      consolidateExisting: 6,
+      unresolvedKeptSeparate: 22,
+      preDevicePreserved: 240,
+      blockers: 0
+    },
+    actions: [],
+    unresolvedRecordingIds: [],
+    blockers: []
+  }
+})
 const mockPreviewOtterReconciliation = vi.fn().mockResolvedValue({
   success: true,
   preview: {
@@ -140,7 +161,8 @@ global.window.electronAPI = {
     previewOtter: mockPreviewOtter,
     commitOtter: mockCommitOtter,
     previewOtterReconciliation: mockPreviewOtterReconciliation,
-    saveOtterReconciliationReviews: mockSaveOtterReconciliationReviews
+    saveOtterReconciliationReviews: mockSaveOtterReconciliationReviews,
+    previewOtterCanonicalMerge: mockPreviewOtterCanonicalMerge
   },
   config: {
     get: vi.fn().mockResolvedValue({
@@ -295,7 +317,7 @@ describe('Settings Page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Unresolved (1)' }))
     expect(screen.getByText(/Needs fingerprint\.mp3/)).toBeInTheDocument()
     expect(screen.getByText(/preview is read-only/i)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /merge/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^apply.*merge/i })).not.toBeInTheDocument()
   })
 
   it('reviews and persistently saves a non-destructive reconciliation plan', async () => {
@@ -323,7 +345,21 @@ describe('Settings Page', () => {
         })
       ])
     ))
-    expect(screen.queryByRole('button', { name: /merge/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^apply.*merge/i })).not.toBeInTheDocument()
+  })
+
+  it('runs a read-only canonical merge dry run without exposing an apply action', async () => {
+    render(<Settings />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Preview HiDock Reconciliation' }))
+    await screen.findByText('Vendor planning.mp3')
+    fireEvent.click(await screen.findByRole('button', { name: 'Run Canonical Merge Dry Run' }))
+
+    await waitFor(() => expect(mockPreviewOtterCanonicalMerge).toHaveBeenCalledOnce())
+    expect(screen.getByText('373')).toBeInTheDocument()
+    expect(screen.getByText('6')).toBeInTheDocument()
+    expect(screen.getByText(/ready for backup and explicit execution approval/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^apply.*merge/i })).not.toBeInTheDocument()
   })
 
   it('should render health check component', async () => {

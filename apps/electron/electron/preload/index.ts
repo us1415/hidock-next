@@ -347,6 +347,49 @@ export interface ElectronAPI {
       decision: 'pending' | 'confirmed' | 'separate'
       matchMethod: 'exact-timestamp' | 'date-duration' | 'adjacent-date-duration' | null
     }>) => Promise<{ success: boolean; saved?: number; error?: string }>
+    previewOtterCanonicalMerge: () => Promise<{
+      success: boolean
+      error?: string
+      plan?: {
+        generatedAt: string
+        previewGeneratedAt: string
+        policy: string
+        fingerprint: string
+        ready: boolean
+        counts: {
+          proposedAccepted: number
+          canonicalizeImported: number
+          consolidateExisting: number
+          unresolvedKeptSeparate: number
+          preDevicePreserved: number
+          blockers: number
+        }
+        actions: Array<{
+          importedRecordingId: string
+          importedFilename: string
+          deviceFilename: string
+          deviceRecordedAt: string
+          matchMethod: 'exact-timestamp' | 'date-duration' | 'adjacent-date-duration'
+          kind: 'canonicalize-imported' | 'consolidate-existing'
+          canonicalRecordingId: string
+          blockers: string[]
+        }>
+        unresolvedRecordingIds: string[]
+        blockers: string[]
+      }
+    }>
+    applyOtterCanonicalMerge: (request: { fingerprint: string; confirmation: string }) => Promise<{
+      success: boolean
+      error?: string
+      result?: {
+        batchId: string
+        backupPath: string
+        canonicalized: number
+        consolidated: number
+        keptSeparate: number
+        archivedAudioPaths: string[]
+      }
+    }>
     previewOtter: () => Promise<{
       success: boolean
       canceled?: boolean
@@ -820,6 +863,8 @@ const electronAPI: ElectronAPI = {
   imports: {
     previewOtterReconciliation: () => callIPC('imports:preview-otter-reconciliation'),
     saveOtterReconciliationReviews: (reviews) => callIPC('imports:save-otter-reconciliation-reviews', reviews),
+    previewOtterCanonicalMerge: () => callIPC('imports:preview-otter-canonical-merge'),
+    applyOtterCanonicalMerge: (request) => callIPC('imports:apply-otter-canonical-merge', request),
     previewOtter: () => callIPC('imports:preview-otter'),
     commitOtter: (archivePath, selectedKeys) => callIPC('imports:commit-otter', archivePath, selectedKeys)
   },
