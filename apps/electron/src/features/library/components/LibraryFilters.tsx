@@ -1,4 +1,4 @@
-import { Filter, Cloud, HardDrive, Check, Search, ArrowUpDown, ChevronUp, ChevronDown } from 'lucide-react'
+import { Filter, Cloud, HardDrive, Check, Search, ArrowUpDown, ChevronUp, ChevronDown, Inbox } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import {
   FilterMode,
@@ -15,6 +15,7 @@ interface LibraryFiltersProps {
     both: number
     onSource: number
     locallyAvailable: number
+    reviewNew?: number
   }
   filterMode: FilterMode
   semanticFilter: SemanticLocationFilter
@@ -23,6 +24,7 @@ interface LibraryFiltersProps {
   qualityFilter: string
   statusFilter: string
   searchQuery: string
+  reviewOnly: boolean
   sortBy?: SortBy
   sortOrder?: SortOrder
   onFilterModeChange: (mode: FilterMode) => void
@@ -32,6 +34,7 @@ interface LibraryFiltersProps {
   onQualityFilterChange: (filter: string) => void
   onStatusFilterChange: (filter: string) => void
   onSearchQueryChange: (query: string) => void
+  onReviewOnlyChange: (enabled: boolean) => void
   onSortByChange?: (sortBy: SortBy) => void
   onSortOrderChange?: (order: SortOrder) => void
 }
@@ -47,6 +50,7 @@ export function LibraryFilters({
   qualityFilter,
   statusFilter,
   searchQuery,
+  reviewOnly,
   sortBy,
   sortOrder,
   onFilterModeChange,
@@ -56,6 +60,7 @@ export function LibraryFilters({
   onQualityFilterChange,
   onStatusFilterChange,
   onSearchQueryChange,
+  onReviewOnlyChange,
   onSortByChange,
   onSortOrderChange
 }: LibraryFiltersProps) {
@@ -70,7 +75,8 @@ export function LibraryFilters({
     categoryFilter !== 'all',
     qualityFilter !== 'all',
     statusFilter !== 'all',
-    searchQuery.length > 0
+    searchQuery.length > 0,
+    reviewOnly
   ].filter(Boolean).length
 
   return (
@@ -242,6 +248,19 @@ export function LibraryFilters({
             </button>
           ))}
         </div>
+
+        <button
+          onClick={() => onReviewOnlyChange(!reviewOnly)}
+          className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+            reviewOnly ? 'bg-amber-500 text-white border-amber-500' : 'hover:bg-muted'
+          }`}
+          aria-pressed={reviewOnly}
+          aria-label="Show new recordings awaiting review"
+          title="Newly detected recordings are reviewed here before any paid transcription"
+        >
+          <Inbox className="h-3 w-3 inline mr-1" />
+          Review ({stats.reviewNew ?? 0})
+        </button>
 
         {/* Search */}
         <div className="relative flex-1 max-w-xs">

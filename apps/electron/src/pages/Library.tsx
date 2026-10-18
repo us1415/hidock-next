@@ -7,6 +7,7 @@ import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 import {
   UnifiedRecording,
   hasLocalPath,
+  hasDeviceFile,
   isDeviceOnly,
   matchesSemanticFilter,
   matchesExclusiveFilter
@@ -88,6 +89,7 @@ export function Library() {
     isPending: isFilterPending
   } = useTransitionFilters()
   const deferredSearchQuery = useDeferredValue(searchQuery)
+  const [reviewOnly, setReviewOnly] = useState(false)
 
   // Sort state
   const { sortBy, sortOrder } = useLibrarySorting()
@@ -103,7 +105,7 @@ export function Library() {
   useEffect(() => {
     enrichmentAbortController.current.abort()
     enrichmentAbortController.current = new AbortController()
-  }, [filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, searchQuery])
+  }, [filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, searchQuery, reviewOnly])
 
   // Drag-and-drop state for file import
   const [isDragOver, setIsDragOver] = useState(false)
@@ -187,6 +189,7 @@ export function Library() {
   const [bulkProcessing, setBulkProcessing] = useState(false)
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 })
   const [deleting, setDeleting] = useState<string | null>(null)
+  const [reviewStatusUpdating, setReviewStatusUpdating] = useState<string | null>(null)
 
   // B-LIB-006: Confirm dialog state (replaces window.confirm)
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -328,6 +331,7 @@ export function Library() {
           : matchesExclusiveFilter(rec.location, exclusiveFilter)
 
       if (!locationMatches) return false
+      if (reviewOnly && rec.reviewStatus !== 'new') return false
       if (categoryFilter !== null && rec.category !== categoryFilter) return false
       if (qualityFilter !== null && rec.quality !== qualityFilter) return false
       if (statusFilter !== null && rec.status !== statusFilter) return false
@@ -391,7 +395,7 @@ export function Library() {
     })
 
     return filtered
-  }, [recordings, filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery, sortBy, sortOrder])
+  }, [recordings, filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery, sortBy, sortOrder, reviewOnly])
 
   // Announce filter result changes (after filteredRecordings is declared)
   useEffect(() => {
@@ -525,6 +529,32 @@ export function Library() {
       setBulkProgress({ current: 0, total: 0 })
     }
   }, [filteredRecordings, selectedIds, refresh, clearSelection, queueBulkTranscriptions])
+
+  const handleSelectedExport = useCallback(async () => {
+    const exportIds = filteredRecordings
+      .filter((recording) => selectedIds.has(recording.id) && transcripts.has(recording.id))
+      .map((recording) => recording.id)
+    if (exportIds.length === 0) return
+
+    setBulkProcessing(true)
+    try {
+      const result = await window.electronAPI.transcripts.exportBatch(exportIds, 'markdown')
+      if (result.canceled) return
+      if (!result.success) {
+        toast.error('Export failed', result.error || 'Could not export selected transcripts.')
+        return
+      }
+      const skipped = result.skipped || 0
+      const detail = skipped > 0
+        ? `Exported ${result.exported || 0}; ${skipped} could not be exported. See the manifest for details.`
+        : `Exported ${result.exported || 0} transcript${result.exported === 1 ? '' : 's'} with a manifest.`
+      toast.success('Batch export complete', detail)
+    } catch (error) {
+      toast.error('Export failed', error instanceof Error ? error.message : 'Could not export selected transcripts.')
+    } finally {
+      setBulkProcessing(false)
+    }
+  }, [filteredRecordings, selectedIds, transcripts])
 
   // B-LIB-006: Extracted bulk delete execution (called after confirmation)
   const executeBulkDelete = useCallback(async (selectedRecordings: UnifiedRecording[]) => {
@@ -707,6 +737,41 @@ export function Library() {
     [handleDelete]
   )
 
+  const handleReviewStatusChange = useCallback(async (
+    recording: UnifiedRecording,
+    status: 'new' | 'dismissed'
+  ) => {
+    if (!hasDeviceFile(recording) || !recording.deviceId || !window.electronAPI.deviceIngestion) {
+      toast.error('Review update failed', 'The connected device could not be identified.')
+      return
+    }
+
+    setReviewStatusUpdating(recording.id)
+    try {
+      const updated = await window.electronAPI.deviceIngestion.updateReviewStatus({
+        deviceId: recording.deviceId,
+        filename: recording.deviceFilename,
+        status
+      })
+      if (!updated) throw new Error('The recording is no longer present in the review queue.')
+
+      if (status === 'dismissed') {
+        toast.success('Marked reviewed', 'The recording remains available on the device and under All.')
+        if (reviewOnly && selectedSourceId === recording.id) setSelectedSourceId(null)
+      } else {
+        toast.success('Added to Review', 'No download or transcription was started.')
+      }
+      await refresh(false)
+    } catch (reviewError) {
+      toast.error(
+        'Review update failed',
+        reviewError instanceof Error ? reviewError.message : 'Could not update the review queue.'
+      )
+    } finally {
+      setReviewStatusUpdating(null)
+    }
+  }, [refresh, reviewOnly, selectedSourceId, setSelectedSourceId])
+
   const handleAskAssistantCallback = useCallback(
     (recording: UnifiedRecording) => {
       handleAskAssistant(recording)
@@ -859,6 +924,7 @@ export function Library() {
             qualityFilter={qualityFilter ?? 'all'}
             statusFilter={statusFilter ?? 'all'}
             searchQuery={searchQuery}
+            reviewOnly={reviewOnly}
             sortBy={sortBy}
             sortOrder={sortOrder}
             onFilterModeChange={setFilterMode}
@@ -868,6 +934,7 @@ export function Library() {
             onQualityFilterChange={(filter) => setQualityFilter(filter === 'all' ? null : filter)}
             onStatusFilterChange={(filter) => setStatusFilter(filter === 'all' ? null : filter)}
             onSearchQueryChange={setSearchQuery}
+            onReviewOnlyChange={setReviewOnly}
             onSortByChange={setSortBy}
             onSortOrderChange={setSortOrder}
           />
@@ -890,7 +957,11 @@ export function Library() {
         onDeselectAll={clearSelection}
         onDownload={handleSelectedDownload}
         onProcess={handleSelectedProcess}
+        onExport={handleSelectedExport}
         onDelete={handleSelectedDelete}
+        disabledActions={{
+          export: !filteredRecordings.some((recording) => selectedIds.has(recording.id) && transcripts.has(recording.id))
+        }}
       />
 
       {/* Error display */}
@@ -1098,6 +1169,9 @@ export function Library() {
               onDelete={() => {
                 if (selectedRecording) handleDeleteCallback(selectedRecording)
               }}
+              onReviewStatusChange={(status) => {
+                if (selectedRecording) handleReviewStatusChange(selectedRecording, status)
+              }}
               // State for button disabling
               deviceConnected={deviceConnected}
               isDownloading={selectedRecording && isDeviceOnly(selectedRecording)
@@ -1107,6 +1181,7 @@ export function Library() {
                 ? downloadQueue.get(selectedRecording.deviceFilename)?.progress
                 : undefined}
               isDeleting={selectedRecording ? deleting === selectedRecording.id : false}
+              isUpdatingReviewStatus={selectedRecording ? reviewStatusUpdating === selectedRecording.id : false}
               // Navigation
               onNavigateToMeeting={handleNavigateToMeeting}
               // Metadata editing

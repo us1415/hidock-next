@@ -16,12 +16,13 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { AudioPlayer } from '@/components/AudioPlayer'
-import { formatDateTime, formatDuration, formatBytes } from '@/lib/utils'
+import { formatDateTime, formatDuration, formatBytes, formatSourceDateTime } from '@/lib/utils'
 import { parseJsonArray, Transcript, Meeting } from '@/types'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { useLibraryStore } from '@/store/useLibraryStore'
+import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
 
 interface SourceCardProps {
   recording: UnifiedRecording
@@ -72,6 +73,7 @@ export const SourceCard = memo(function SourceCard({
 }: SourceCardProps) {
   const canPlay = hasLocalPath(recording)
   const error = useLibraryStore((state) => state.recordingErrors.get(recording.id))
+  const displayTitle = getDisplayTitle(recording, meeting, transcript)
 
   const handleCheckboxClick = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -109,9 +111,19 @@ export const SourceCard = memo(function SourceCard({
             )}
             <StatusIcon recording={recording} />
             <div>
-              <CardTitle className="text-base">{recording.title || recording.filename}</CardTitle>
+              <div className="flex items-center gap-2">
+                <CardTitle className="text-base">{displayTitle.primaryText}</CardTitle>
+                {recording.reviewStatus === 'new' && (
+                  <span className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">
+                    New
+                  </span>
+                )}
+              </div>
               <CardDescription>
-                {formatDateTime(recording.dateRecorded.toISOString())}
+                {formatSourceDateTime(
+                  recording.sourceDateValue ?? recording.dateRecorded?.toISOString(),
+                  recording.sourceDatePrecision
+                )}
                 {recording.size && ` • ${formatBytes(recording.size)}`}
                 {recording.duration && ` • ${formatDuration(recording.duration)}`}
               </CardDescription>

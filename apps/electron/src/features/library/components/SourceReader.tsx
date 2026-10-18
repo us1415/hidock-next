@@ -14,7 +14,22 @@ import { TranscriptViewer } from './TranscriptViewer'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, Meeting, parseJsonArray } from '@/types'
-import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X } from 'lucide-react'
+import {
+  Calendar,
+  Download,
+  Trash2,
+  Wand2,
+  RefreshCw,
+  Play,
+  Square,
+  Pencil,
+  Check,
+  Edit2,
+  Link,
+  X,
+  FileDown,
+  ListPlus
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -23,7 +38,8 @@ import {
 import { toast } from '@/components/ui/toaster'
 import { RecordingLinkDialog } from '@/components/RecordingLinkDialog'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
-import { formatDateTime, formatDuration, formatBytes } from '@/lib/utils'
+import { formatDateTime, formatDuration, formatBytes, formatSourceDateTime } from '@/lib/utils'
+import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
 
 const CATEGORY_OPTIONS = [
   { value: 'meeting', label: 'Meeting' },
@@ -47,15 +63,36 @@ interface SourceReaderProps {
   onDownload?: () => void
   onTranscribe?: () => void
   onDelete?: () => void
+  onReviewStatusChange?: (status: 'new' | 'dismissed') => void
   // State for button enabling/disabling
   deviceConnected?: boolean
   isDownloading?: boolean
   downloadProgress?: number
   isDeleting?: boolean
+  isUpdatingReviewStatus?: boolean
   // Navigation
   onNavigateToMeeting?: (meetingId: string) => void
   // Metadata editing callback
   onMetadataEdited?: () => void
+}
+
+interface TranscriptionHistoryItem {
+  id: string
+  provider: string
+  model: string
+  attempt: number
+  status: 'processing' | 'completed' | 'failed' | 'cancelled'
+  started_at: string
+  completed_at: string | null
+  elapsed_ms: number | null
+  error_message: string | null
+}
+
+function formatElapsed(elapsedMs: number | null): string {
+  if (elapsedMs === null) return 'In progress'
+  const seconds = Math.max(0, Math.round(elapsedMs / 1000))
+  if (seconds < 60) return `${seconds}s`
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
 }
 
 export function SourceReader({
@@ -70,18 +107,41 @@ export function SourceReader({
   onDownload,
   onTranscribe,
   onDelete,
+  onReviewStatusChange,
   deviceConnected = false,
   isDownloading = false,
   downloadProgress,
   isDeleting = false,
+  isUpdatingReviewStatus = false,
   onNavigateToMeeting,
   onMetadataEdited
 }: SourceReaderProps) {
+
+  const displayTitle = recording ? getDisplayTitle(recording, meeting, transcript) : null
 
   // Title editing state
   const [isEditingTitle, setIsEditingTitle] = useState(false)
   const [editedTitle, setEditedTitle] = useState('')
   const [isSavingTitle, setIsSavingTitle] = useState(false)
+  const [exportingFormat, setExportingFormat] = useState<'markdown' | 'text' | 'pdf' | null>(null)
+  const [transcriptionHistory, setTranscriptionHistory] = useState<TranscriptionHistoryItem[]>([])
+
+  const handleExportTranscript = useCallback(async (format: 'markdown' | 'text' | 'pdf') => {
+    if (!recording || !transcript) return
+    setExportingFormat(format)
+    try {
+      const result = await window.electronAPI.transcripts.export(recording.id, format)
+      if (result.success) {
+        toast.success('Transcript exported', result.filePath)
+      } else if (!result.canceled) {
+        toast.error('Export failed', result.error || 'Could not export transcript')
+      }
+    } catch (error) {
+      toast.error('Export failed', error instanceof Error ? error.message : 'Could not export transcript')
+    } finally {
+      setExportingFormat(null)
+    }
+  }, [recording, transcript])
 
   // Category saving state
   const [isSavingCategory, setIsSavingCategory] = useState(false)
@@ -102,15 +162,33 @@ export function SourceReader({
     setShowTranscribeWarning(false)
   }, [recording?.id])
 
+  useEffect(() => {
+    let active = true
+    setTranscriptionHistory([])
+    if (!recording?.id) return () => { active = false }
+    const loadHistory = window.electronAPI?.recordings?.getTranscriptionHistory
+    if (!loadHistory) return () => { active = false }
+
+    loadHistory(recording.id)
+      .then((items) => {
+        if (active) setTranscriptionHistory(items)
+      })
+      .catch((error) => {
+        console.error('Failed to load transcription history:', error)
+      })
+
+    return () => { active = false }
+  }, [recording?.id, recording?.transcriptionStatus])
+
   const handleSaveTitle = useCallback(async () => {
     if (!recording?.knowledgeCaptureId) return
     const trimmed = editedTitle.trim()
     if (!trimmed) {
-      setEditedTitle(recording.title || recording.filename)
+      setEditedTitle(displayTitle?.primaryText || recording.filename)
       toast.error('Title cannot be empty')
       return
     }
-    if (trimmed === (recording.title || recording.filename)) {
+    if (trimmed === (displayTitle?.primaryText || recording.filename)) {
       setIsEditingTitle(false)
       return
     }
@@ -134,7 +212,7 @@ export function SourceReader({
     } finally {
       setIsSavingTitle(false)
     }
-  }, [editedTitle, recording, onMetadataEdited])
+  }, [displayTitle?.primaryText, editedTitle, recording, onMetadataEdited])
 
   const handleCancelTitle = useCallback(() => {
     setIsEditingTitle(false)
@@ -201,9 +279,9 @@ export function SourceReader({
   const linkDialogRecording = {
     id: recording.id,
     filename: recording.filename,
-    date_recorded: recording.dateRecorded instanceof Date
-      ? recording.dateRecorded.toISOString()
-      : String(recording.dateRecorded),
+    date_recorded: recording.sourceDatePrecision === 'date-only' || recording.sourceDatePrecision === 'unknown'
+      ? ''
+      : recording.sourceDateValue ?? recording.dateRecorded?.toISOString() ?? '',
     duration_seconds: recording.duration ?? null
   }
 
@@ -236,14 +314,14 @@ export function SourceReader({
               </div>
             ) : (
               <div className="group flex items-center gap-2">
-                <h2 className="text-xl font-semibold truncate" title={recording.filename}>
-                  {recording.title || recording.filename}
+                <h2 className="text-xl font-semibold truncate" title={displayTitle?.primaryText}>
+                  {displayTitle?.primaryText}
                 </h2>
                 {recording.knowledgeCaptureId && (
                   <button
                     onClick={() => {
                       setIsEditingTitle(true)
-                      setEditedTitle(recording.title || recording.filename)
+                      setEditedTitle(displayTitle?.primaryText || recording.filename)
                     }}
                     className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-muted"
                     aria-label="Edit title"
@@ -260,10 +338,10 @@ export function SourceReader({
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 text-sm">
             <div>
               <p className="text-xs font-medium text-muted-foreground mb-1">Date Recorded</p>
-              <p>{(() => {
-                const date = new Date(recording.dateRecorded)
-                return !isNaN(date.getTime()) ? formatDateTime(date.toISOString()) : 'Unknown'
-              })()}</p>
+              <p>{formatSourceDateTime(
+                recording.sourceDateValue ?? recording.dateRecorded?.toISOString(),
+                recording.sourceDatePrecision
+              )}</p>
             </div>
             <div>
               <p className="text-xs font-medium text-muted-foreground mb-1">Duration</p>
@@ -311,7 +389,7 @@ export function SourceReader({
               <p className="text-xs font-medium text-muted-foreground mb-1">Transcription</p>
               <p className="capitalize">{recording.transcriptionStatus}</p>
             </div>
-            {recording.title && recording.filename !== recording.title && (
+            {displayTitle?.source !== 'filename' && (
               <div>
                 <p className="text-xs font-medium text-muted-foreground mb-1">Filename</p>
                 <p className="truncate" title={recording.filename}>{recording.filename}</p>
@@ -353,6 +431,30 @@ export function SourceReader({
             </div>
           )}
 
+          {transcriptionHistory.length > 0 && (
+            <div className="mt-4 p-3 bg-muted/30 border rounded-lg">
+              <p className="text-xs font-medium text-muted-foreground mb-2">Processing history</p>
+              <div className="space-y-2">
+                {transcriptionHistory.slice(0, 5).map((item) => (
+                  <div key={item.id} className="flex items-start justify-between gap-3 text-xs">
+                    <div className="min-w-0">
+                      <p className="font-medium capitalize">
+                        {item.status} · {item.provider} / {item.model}
+                      </p>
+                      <p className="text-muted-foreground">
+                        {formatDateTime(item.started_at)} · attempt {item.attempt}
+                      </p>
+                      {item.error_message && (
+                        <p className="text-destructive mt-1 break-words">{item.error_message}</p>
+                      )}
+                    </div>
+                    <span className="shrink-0 text-muted-foreground">{formatElapsed(item.elapsed_ms)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Transcript Summary */}
           {transcript?.summary && (
             <div className="mt-4 p-3 bg-muted/30 border rounded-lg">
@@ -372,6 +474,42 @@ export function SourceReader({
 
       {/* Action Buttons Section */}
       <div className="flex flex-wrap gap-2 px-6 py-3 border-b bg-muted/30">
+        {recording.reviewStatus === 'new' && onReviewStatusChange && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onReviewStatusChange('dismissed')}
+            disabled={isUpdatingReviewStatus}
+            className="gap-2"
+            title="Remove from Review without downloading, transcribing, or deleting the recording"
+          >
+            {isUpdatingReviewStatus ? (
+              <RefreshCw className="h-4 w-4 animate-spin" />
+            ) : (
+              <Check className="h-4 w-4" />
+            )}
+            Mark Reviewed
+          </Button>
+        )}
+
+        {recording.reviewStatus === 'dismissed' && onReviewStatusChange && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onReviewStatusChange('new')}
+            disabled={isUpdatingReviewStatus}
+            className="gap-2"
+            title="Return this recording to the Review queue"
+          >
+            {isUpdatingReviewStatus ? (
+              <RefreshCw className="h-4 w-4 animate-spin" />
+            ) : (
+              <ListPlus className="h-4 w-4" />
+            )}
+            Add to Review
+          </Button>
+        )}
+
         {/* Play/Stop Button - only for local recordings - LB-03 fix: Wire up onPlay callback */}
         {canPlay && onPlay && (
           isPlaying ? (
@@ -468,6 +606,44 @@ export function SourceReader({
               </>
             )}
           </Button>
+        )}
+
+        {transcript && (
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleExportTranscript('pdf')}
+              disabled={exportingFormat !== null}
+              className="gap-2"
+              title="Export a polished PDF with the original recording date"
+            >
+              {exportingFormat === 'pdf' ? <RefreshCw className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" />}
+              Export PDF
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleExportTranscript('markdown')}
+              disabled={exportingFormat !== null}
+              className="gap-2"
+              title="Export transcript as Markdown with the original recording date"
+            >
+              {exportingFormat === 'markdown' ? <RefreshCw className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" />}
+              Export .md
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleExportTranscript('text')}
+              disabled={exportingFormat !== null}
+              className="gap-2"
+              title="Export transcript as plain text with the original recording date"
+            >
+              {exportingFormat === 'text' ? <RefreshCw className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" />}
+              Export .txt
+            </Button>
+          </>
         )}
 
         {/* Delete Button - always available */}

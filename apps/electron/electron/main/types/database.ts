@@ -49,6 +49,8 @@ export interface Recording {
   file_size: number | null
   duration_seconds: number | null
   date_recorded: string
+  source_date_precision?: 'exact' | 'date-only' | 'unknown'
+  source_date_evidence?: string | null
   meeting_id: string | null
   correlation_confidence: number | null
   correlation_method: string | null

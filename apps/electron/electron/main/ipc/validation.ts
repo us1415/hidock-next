@@ -109,7 +109,48 @@ export const AssignTierSchema = z.object({
 /**
  * Recording ID validation
  */
-export const RecordingIdSchema = z.string().uuid('Recording ID must be a valid UUID')
+export const RecordingIdSchema = z.string().refine(
+  (value) => z.string().uuid().safeParse(value).success || /^rec_[A-Za-z0-9._-]{1,195}$/.test(value),
+  'Recording ID must be a UUID or a valid legacy recording ID'
+)
+
+/** Stable hardware identifier used to isolate discovery state per HiDock. */
+export const DeviceIdSchema = z.string().trim().min(1).max(200).regex(
+  /^[A-Za-z0-9._:-]+$/,
+  'Device ID contains unsupported characters'
+)
+
+export const DeviceFilenameSchema = z.string().trim().min(1).max(255).refine(
+  (value) => !value.includes('/') && !value.includes('\\') && !value.includes('\0'),
+  'Device filename must not contain a path'
+)
+
+export const DeviceReviewStatusSchema = z.enum(['new', 'approved', 'dismissed'])
+
+export const ObserveDeviceInventorySchema = z.object({
+  deviceId: DeviceIdSchema,
+  files: z.array(z.object({
+    filename: DeviceFilenameSchema,
+    fileSize: z.number().int().nonnegative(),
+    recordedAt: z.string().datetime().nullable()
+  })).max(10000)
+})
+
+export const GetDeviceReviewItemsSchema = z.object({
+  deviceId: DeviceIdSchema,
+  status: DeviceReviewStatusSchema.optional()
+})
+
+export const UpdateDeviceReviewStatusSchema = z.object({
+  deviceId: DeviceIdSchema,
+  filename: DeviceFilenameSchema,
+  status: DeviceReviewStatusSchema
+})
+
+export const MarkDeviceSyncSuccessSchema = z.object({
+  deviceId: DeviceIdSchema,
+  latestSyncedRecordedAt: z.string().datetime().nullable()
+})
 
 /**
  * Get recording by ID request

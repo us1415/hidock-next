@@ -19,13 +19,15 @@ import {
 import { validateDevicePath } from '../utils/path-validation'
 import { withTimeout, isAbortError } from '../utils/timeout'
 import { shouldLogQa } from './qa-monitor'
+import { resolveSourceRecordingDate } from '../utils/recordingDate'
 
 export interface HiDockRecording {
   id: string
   filename: string
   size: number
   duration: number
-  dateCreated: Date
+  /** Source recording date, or null when neither device metadata nor filename can establish it. */
+  dateCreated: Date | null
   version: number
   signature: string
 }
@@ -550,7 +552,7 @@ class HiDockDeviceService {
       filename: rec.filename,
       size: rec.size ?? 0,
       duration: rec.duration ?? 0,
-      dateCreated: rec.dateCreated?.toISOString() || new Date().toISOString()
+      dateCreated: rec.dateCreated?.toISOString() ?? null
     }))
 
     // Fire and forget - don't block disconnect
@@ -1513,7 +1515,7 @@ class HiDockDeviceService {
       filename: file.name,
       size: file.length,
       duration: file.duration,
-      dateCreated: file.time || new Date(),
+      dateCreated: resolveSourceRecordingDate(file.name, file.time),
       version: file.version,
       signature: file.signature
     }

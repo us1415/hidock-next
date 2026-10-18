@@ -5,6 +5,11 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'jsdom',
+    // Wall-clock Library performance budgets become meaningless when multiple
+    // jsdom suites compete for the same CPU. Run files serially so the default
+    // `npm test -- --run` gate is deterministic; individual tests still run in
+    // their declared order within each file.
+    fileParallelism: false,
     setupFiles: ['./src/test/setup.ts'],
     include: ['**/__tests__/**/*.test.ts', '**/__tests__/**/*.test.tsx'],
     coverage: {

@@ -285,6 +285,184 @@ describe('Database Service', () => {
     })
   })
 
+  describe('getRecordingByFilePath()', () => {
+    it('finds imported audio by its collision-safe physical path', async () => {
+      const dbModule = await initTestDatabase()
+      const mockRecording = {
+        id: 'otter-recording',
+        filename: 'Human readable title.mp3',
+        file_path: '/recordings/otter-batch-0000-source.mp3'
+      }
+      setQueryResults([mockRecording])
+
+      const result = dbModule.getRecordingByFilePath('/recordings/otter-batch-0000-source.mp3')
+
+      expect(result).toEqual(mockRecording)
+      expect(mockStmt.bind).toHaveBeenCalledWith(['/recordings/otter-batch-0000-source.mp3'])
+    })
+  })
+
+  describe('insertRecording()', () => {
+    it('persists imported lifecycle and source fields instead of database defaults', async () => {
+      const dbModule = await initTestDatabase()
+
+      dbModule.insertRecording({
+        id: 'external-123',
+        filename: 'external-file.mp3',
+        original_filename: 'original.mp3',
+        file_path: '/recordings/external-file.mp3',
+        file_size: 1234,
+        duration_seconds: 60,
+        date_recorded: '2026-10-18T10:00:00.000Z',
+        status: 'ready',
+        location: 'local-only',
+        transcription_status: 'complete',
+        on_device: 0,
+        on_local: 1,
+        source: 'external',
+        is_imported: 1,
+        storage_tier: 'archive',
+        source_date_precision: 'date-only',
+        source_date_evidence: 'otter-summary'
+      })
+
+      const insertCall = mockDatabase.run.mock.calls.find(([sql]) =>
+        typeof sql === 'string' && sql.includes('INSERT INTO recordings')
+      )
+      expect(insertCall?.[1]).toEqual([
+        'external-123',
+        'external-file.mp3',
+        'original.mp3',
+        '/recordings/external-file.mp3',
+        1234,
+        60,
+        '2026-10-18T10:00:00.000Z',
+        null,
+        null,
+        null,
+        'ready',
+        'local-only',
+        'complete',
+        0,
+        null,
+        1,
+        'external',
+        1,
+        'archive',
+        'date-only',
+        'otter-summary'
+      ])
+    })
+  })
+
+  describe('importOtterRecordsAtomically()', () => {
+    it('wraps recording and transcript insertion in one transaction', async () => {
+      const dbModule = await initTestDatabase()
+      mockDatabase.run.mockClear()
+      mockDatabase.export.mockClear()
+
+      dbModule.importOtterRecordsAtomically([{
+        recording: {
+          id: 'otter-recording',
+          filename: 'conversation.mp3',
+          original_filename: 'conversation.mp3',
+          file_path: '/recordings/conversation.mp3',
+          file_size: 123,
+          duration_seconds: undefined,
+          date_recorded: '2026-02-12',
+          source_date_precision: 'date-only',
+          source_date_evidence: 'otter-summary-date',
+          status: 'ready',
+          location: 'local-only',
+          transcription_status: 'complete',
+          on_device: 0,
+          on_local: 1,
+          source: 'import',
+          is_imported: 1
+        },
+        transcript: {
+          id: 'otter-transcript',
+          recording_id: 'otter-recording',
+          full_text: 'Imported transcript',
+          language: 'unknown',
+          transcription_provider: 'otter-import',
+          transcription_model: 'otter-export'
+        }
+      }])
+
+      expect(mockDatabase.run.mock.calls[0][0]).toBe('BEGIN TRANSACTION')
+      expect(mockDatabase.run.mock.calls.some(([sql]) =>
+        typeof sql === 'string' && sql.includes('INSERT INTO recordings')
+      )).toBe(true)
+      expect(mockDatabase.run.mock.calls.some(([sql]) =>
+        typeof sql === 'string' && sql.includes('INSERT INTO transcripts')
+      )).toBe(true)
+      expect(mockDatabase.run.mock.calls.at(-1)?.[0]).toBe('COMMIT')
+      expect(mockDatabase.export).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('updateKnowledgeCaptureTitle()', () => {
+    function statementReturning(row: Record<string, unknown>) {
+      let returned = false
+      return {
+        bind: vi.fn(),
+        step: vi.fn(() => {
+          if (returned) return false
+          returned = true
+          return true
+        }),
+        getAsObject: vi.fn(() => row),
+        free: vi.fn()
+      }
+    }
+
+    it('updates only the display title while preserving the recording filename', async () => {
+      const dbModule = await initTestDatabase()
+      mockDatabase.run.mockClear()
+      mockDatabase.prepare
+        .mockImplementationOnce(() => statementReturning({
+          id: 'rec-123',
+          filename: '2026Oct16-102913-Rec21.mp3',
+          migrated_to_capture_id: 'kc-123'
+        }) as any)
+        .mockImplementationOnce(() => statementReturning({
+          id: 'kc-123',
+          title: '2026Oct16-102913-Rec21.mp3'
+        }) as any)
+
+      dbModule.updateKnowledgeCaptureTitle('rec-123', 'Vendor Direct Portal and Intake Planning')
+
+      expect(mockDatabase.run).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE knowledge_captures SET title = ?'),
+        ['Vendor Direct Portal and Intake Planning', 'kc-123']
+      )
+      expect(mockDatabase.run.mock.calls.some(([sql]) => /UPDATE\s+recordings/i.test(String(sql)))).toBe(false)
+    })
+
+    it('does not overwrite an existing custom title', async () => {
+      const dbModule = await initTestDatabase()
+      mockDatabase.run.mockClear()
+      mockDatabase.prepare
+        .mockImplementationOnce(() => statementReturning({
+          id: 'rec-123',
+          filename: '2026Oct16-102913-Rec21.mp3',
+          migrated_to_capture_id: 'kc-123'
+        }) as any)
+        .mockImplementationOnce(() => statementReturning({
+          id: 'kc-123',
+          title: 'My chosen project title'
+        }) as any)
+
+      dbModule.updateKnowledgeCaptureTitle('rec-123', 'New AI suggestion')
+
+      expect(mockDatabase.run).not.toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE knowledge_captures SET title = ?'),
+        expect.anything()
+      )
+    })
+  })
+
   // =========================================================================
   // 3. insertTranscript
   // =========================================================================
@@ -485,6 +663,44 @@ describe('Database Service', () => {
       expect(sql).not.toContain('started_at')
       expect(sql).not.toContain('completed_at')
       expect(updateCall![1]).toEqual(['cancelled', 'q-4'])
+    })
+  })
+
+  describe('transcription history', () => {
+    let dbModule: Awaited<ReturnType<typeof initTestDatabase>>
+
+    beforeEach(async () => {
+      dbModule = await initTestDatabase()
+      mockDatabase.run.mockClear()
+    })
+
+    it('records provider, model, and attempt when processing starts', () => {
+      const historyId = dbModule.startTranscriptionHistory('rec-1', 'queue-1', 'openai', 'gpt-transcribe', 2)
+      const insertCall = mockDatabase.run.mock.calls.find(
+        (call: any[]) => typeof call[0] === 'string' && call[0].includes('INSERT INTO transcription_history')
+      )
+
+      expect(historyId).toEqual(expect.any(String))
+      expect(insertCall).toBeDefined()
+      expect(insertCall![1]).toEqual([
+        historyId,
+        'rec-1',
+        'queue-1',
+        'openai',
+        'gpt-transcribe',
+        2,
+        expect.any(String)
+      ])
+    })
+
+    it('records elapsed time and errors when an attempt finishes', () => {
+      dbModule.finishTranscriptionHistory('history-1', 'failed', 1234.7, 'Rate limited')
+      const updateCall = mockDatabase.run.mock.calls.find(
+        (call: any[]) => typeof call[0] === 'string' && call[0].includes('UPDATE transcription_history')
+      )
+
+      expect(updateCall).toBeDefined()
+      expect(updateCall![1]).toEqual(['failed', expect.any(String), 1235, 'Rate limited', 'history-1'])
     })
   })
 

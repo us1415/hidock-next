@@ -83,6 +83,17 @@ describe('DownloadService', () => {
   })
 
   describe('basic queue operations', () => {
+    it('requires review instead of syncing when the original recording date is unknown', () => {
+      const [result] = service.getFilesToSync([{
+        filename: 'undated-recording.hda',
+        size: 1024,
+        duration: 60,
+        dateCreated: null
+      }])
+
+      expect(result.skipReason).toBe('Original recording date is unknown; review required')
+    })
+
     it('should queue downloads and return queued IDs', () => {
       const ids = service.queueDownloads([
         { filename: 'test1.hda', size: 1024 },

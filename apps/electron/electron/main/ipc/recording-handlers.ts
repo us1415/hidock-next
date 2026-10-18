@@ -2,6 +2,7 @@ import { ipcMain, dialog, BrowserWindow } from 'electron'
 import {
   getRecordings,
   getRecordingById,
+  resolveRecordingId,
   getRecordingsForMeeting,
   updateRecordingStatus,
   updateRecordingTranscriptionStatus,
@@ -9,12 +10,13 @@ import {
   getTranscriptByRecordingId,
   getCandidatesForRecordingWithDetails,
   getMeetingsNearDate,
+  getTranscriptionHistory,
   insertRecording,
   type Recording,
   type Transcript
 } from '../services/database'
 import { getRecordingFiles, deleteRecording as deleteRecordingFile, getRecordingsPath } from '../services/file-storage'
-import { copyFileSync, existsSync, statSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync, statSync, writeFileSync, utimesSync } from 'fs'
 import { basename, join, extname } from 'path'
 import { randomUUID } from 'crypto'
 import {
@@ -33,6 +35,7 @@ import {
 } from '../services/transcription'
 import { getQueueItems, addToQueue, updateQueueItem } from '../services/database'
 import { getConfig } from '../services/config'
+import { createTranscriptPdfBuffer } from '../services/transcript-pdf'
 import {
   GetRecordingByIdSchema,
   DeleteRecordingSchema,
@@ -46,6 +49,91 @@ import {
 
 export interface RecordingWithTranscript extends Recording {
   transcript?: Transcript
+}
+
+type TranscriptExportFormat = 'markdown' | 'text' | 'pdf'
+
+interface TranscriptBatchManifestItem {
+  recordingId: string
+  originalFilename?: string
+  recordedAt?: string
+  provider?: string
+  model?: string
+  transcriptFile?: string
+  status: 'exported' | 'skipped' | 'failed'
+  reason?: string
+}
+
+export interface TranscriptBatchManifest {
+  schemaVersion: 1
+  exportedAt: string
+  format: TranscriptExportFormat
+  items: TranscriptBatchManifestItem[]
+}
+
+function safeExportBaseName(filename: string): string {
+  const safe = basename(filename, extname(filename)).replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').trim()
+  return safe || 'recording'
+}
+
+function uniqueExportPath(directory: string, baseName: string, extension: string, reserved: Set<string>): string {
+  let suffix = 1
+  let candidate = join(directory, `${baseName}-transcript.${extension}`)
+  while (reserved.has(candidate.toLowerCase()) || existsSync(candidate)) {
+    suffix += 1
+    candidate = join(directory, `${baseName}-transcript-${suffix}.${extension}`)
+  }
+  reserved.add(candidate.toLowerCase())
+  return candidate
+}
+
+function uniqueManifestPath(directory: string): string {
+  let suffix = 1
+  let candidate = join(directory, 'hidock-transcript-manifest.json')
+  while (existsSync(candidate)) {
+    suffix += 1
+    candidate = join(directory, `hidock-transcript-manifest-${suffix}.json`)
+  }
+  return candidate
+}
+
+export function buildTranscriptExportContent(
+  recording: Recording,
+  transcript: Transcript,
+  format: TranscriptExportFormat
+): string {
+  const recordedAt = new Date(recording.date_recorded)
+  const recordedDate = Number.isNaN(recordedAt.getTime())
+    ? recording.date_recorded
+    : recordedAt.toISOString()
+  const provider = transcript.transcription_provider || 'unknown'
+  const model = transcript.transcription_model || 'unknown'
+  const title = transcript.title_suggestion?.trim() || basename(recording.filename, extname(recording.filename))
+
+  if (format === 'text') {
+    const lines = [
+      title,
+      `Recorded: ${recordedDate}`,
+      `Original file: ${recording.original_filename || recording.filename}`,
+      `Transcription: ${provider} / ${model}`,
+      ''
+    ]
+    if (transcript.summary?.trim()) lines.push('SUMMARY', transcript.summary.trim(), '')
+    lines.push('TRANSCRIPT', transcript.full_text.trim(), '')
+    return lines.join('\n')
+  }
+
+  const lines = [
+    `# ${title}`,
+    '',
+    `- Recorded: ${recordedDate}`,
+    `- Original file: ${recording.original_filename || recording.filename}`,
+    `- Transcription: ${provider} / ${model}`,
+    ''
+  ]
+  if (transcript.summary?.trim()) lines.push('## Summary', '', transcript.summary.trim(), '')
+  lines.push('## Transcript', '', transcript.full_text.trim(), '')
+  return lines.join('\n')
 }
 
 export function registerRecordingHandlers(): void {
@@ -71,6 +159,18 @@ export function registerRecordingHandlers(): void {
     } catch (error) {
       console.error('recordings:getById error:', error)
       return undefined
+    }
+  })
+
+  ipcMain.handle('recordings:getTranscriptionHistory', async (_, id: unknown) => {
+    try {
+      const result = GetRecordingByIdSchema.safeParse({ id })
+      if (!result.success) return []
+      const canonicalId = resolveRecordingId(result.data.id) ?? result.data.id
+      return getTranscriptionHistory(canonicalId)
+    } catch (error) {
+      console.error('recordings:getTranscriptionHistory error:', error)
+      return []
     }
   })
 
@@ -233,6 +333,175 @@ export function registerRecordingHandlers(): void {
       } catch (error) {
         console.error('recordings:getTranscript error:', error)
         return undefined
+      }
+    }
+  )
+
+  // Export a transcript while preserving the source recording date in both
+  // the document metadata and the exported file's modified timestamp.
+  ipcMain.handle(
+    'transcripts:export',
+    async (event, recordingId: unknown, format: unknown): Promise<{
+      success: boolean
+      canceled?: boolean
+      filePath?: string
+      error?: string
+    }> => {
+      try {
+        if (
+          typeof recordingId !== 'string' ||
+          (format !== 'markdown' && format !== 'text' && format !== 'pdf')
+        ) {
+          return { success: false, error: 'Invalid transcript export request.' }
+        }
+
+        const canonicalId = resolveRecordingId(recordingId)
+        if (!canonicalId) return { success: false, error: 'Recording not found.' }
+
+        const recording = getRecordingById(canonicalId)
+        const transcript = getTranscriptByRecordingId(canonicalId)
+        if (!recording || !transcript) return { success: false, error: 'Transcript not found.' }
+
+        const extension = format === 'markdown' ? 'md' : format === 'pdf' ? 'pdf' : 'txt'
+        const baseName = safeExportBaseName(recording.filename)
+        const win = BrowserWindow.fromWebContents(event.sender) || BrowserWindow.getFocusedWindow()
+        const dialogOptions = {
+          defaultPath: `${baseName}-transcript.${extension}`,
+          filters: format === 'markdown'
+            ? [{ name: 'Markdown', extensions: ['md'] }]
+            : format === 'pdf'
+              ? [{ name: 'PDF', extensions: ['pdf'] }]
+              : [{ name: 'Text', extensions: ['txt'] }]
+        }
+        const saveResult = win
+          ? await dialog.showSaveDialog(win, dialogOptions)
+          : await dialog.showSaveDialog(dialogOptions)
+
+        if (saveResult.canceled || !saveResult.filePath) return { success: false, canceled: true }
+
+        if (format === 'pdf') {
+          writeFileSync(saveResult.filePath, await createTranscriptPdfBuffer(recording, transcript))
+        } else {
+          writeFileSync(saveResult.filePath, buildTranscriptExportContent(recording, transcript, format), 'utf-8')
+        }
+        const sourceDate = new Date(recording.date_recorded)
+        if (!Number.isNaN(sourceDate.getTime())) utimesSync(saveResult.filePath, sourceDate, sourceDate)
+
+        return { success: true, filePath: saveResult.filePath }
+      } catch (error) {
+        console.error('transcripts:export error:', error)
+        return { success: false, error: (error as Error).message }
+      }
+    }
+  )
+
+  // Export selected transcripts to one user-chosen folder with a machine-readable
+  // manifest. The source date is copied into every document and filesystem mtime.
+  ipcMain.handle(
+    'transcripts:exportBatch',
+    async (event, recordingIds: unknown, format: unknown = 'markdown'): Promise<{
+      success: boolean
+      canceled?: boolean
+      directoryPath?: string
+      manifestPath?: string
+      exported?: number
+      skipped?: number
+      error?: string
+    }> => {
+      try {
+        if (
+          !Array.isArray(recordingIds) ||
+          recordingIds.length === 0 ||
+          recordingIds.length > 500 ||
+          !recordingIds.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 200) ||
+          (format !== 'markdown' && format !== 'text' && format !== 'pdf')
+        ) {
+          return { success: false, error: 'Invalid batch transcript export request.' }
+        }
+
+        const win = BrowserWindow.fromWebContents(event.sender) || BrowserWindow.getFocusedWindow()
+        const dialogOptions = {
+          title: 'Choose a folder for transcript exports',
+          properties: ['openDirectory', 'createDirectory'] as Array<'openDirectory' | 'createDirectory'>
+        }
+        const selection = win
+          ? await dialog.showOpenDialog(win, dialogOptions)
+          : await dialog.showOpenDialog(dialogOptions)
+        if (selection.canceled || !selection.filePaths[0]) return { success: false, canceled: true }
+
+        const destination = selection.filePaths[0]
+        mkdirSync(destination, { recursive: true })
+        const extension = format === 'markdown' ? 'md' : format === 'pdf' ? 'pdf' : 'txt'
+        const manifest: TranscriptBatchManifest = {
+          schemaVersion: 1,
+          exportedAt: new Date().toISOString(),
+          format,
+          items: []
+        }
+        const reservedPaths = new Set<string>()
+
+        for (const rendererId of [...new Set(recordingIds as string[])]) {
+          const canonicalId = resolveRecordingId(rendererId)
+          const recording = canonicalId ? getRecordingById(canonicalId) : undefined
+          const transcript = canonicalId ? getTranscriptByRecordingId(canonicalId) : undefined
+          if (!recording || !transcript) {
+            manifest.items.push({
+              recordingId: canonicalId || rendererId,
+              status: 'skipped',
+              reason: recording ? 'Transcript not found.' : 'Recording not found.'
+            })
+            continue
+          }
+
+          const sourceDate = new Date(recording.date_recorded)
+          const manifestBase = {
+            recordingId: canonicalId || rendererId,
+            originalFilename: recording.original_filename || recording.filename,
+            recordedAt: Number.isNaN(sourceDate.getTime()) ? recording.date_recorded : sourceDate.toISOString(),
+            provider: transcript.transcription_provider || 'unknown',
+            model: transcript.transcription_model || 'unknown'
+          }
+          if (Number.isNaN(sourceDate.getTime())) {
+            manifest.items.push({ ...manifestBase, status: 'skipped', reason: 'Original recording date is unknown.' })
+            continue
+          }
+
+          const outputPath = uniqueExportPath(
+            destination,
+            safeExportBaseName(recording.filename),
+            extension,
+            reservedPaths
+          )
+          try {
+            if (format === 'pdf') {
+              writeFileSync(outputPath, await createTranscriptPdfBuffer(recording, transcript))
+            } else {
+              writeFileSync(outputPath, buildTranscriptExportContent(recording, transcript, format), 'utf-8')
+            }
+            utimesSync(outputPath, sourceDate, sourceDate)
+            manifest.items.push({
+              ...manifestBase,
+              transcriptFile: basename(outputPath),
+              status: 'exported'
+            })
+          } catch (error) {
+            manifest.items.push({
+              ...manifestBase,
+              transcriptFile: basename(outputPath),
+              status: 'failed',
+              reason: error instanceof Error ? error.message : 'Export failed.'
+            })
+          }
+        }
+
+        const manifestPath = uniqueManifestPath(destination)
+        writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8')
+        const exported = manifest.items.filter((item) => item.status === 'exported').length
+        const skipped = manifest.items.length - exported
+        return { success: true, directoryPath: destination, manifestPath, exported, skipped }
+      } catch (error) {
+        console.error('transcripts:exportBatch error:', error)
+        return { success: false, error: error instanceof Error ? error.message : 'Batch export failed.' }
       }
     }
   )
@@ -418,6 +687,8 @@ export function registerRecordingHandlers(): void {
         file_size: stats.size,
         duration_seconds: undefined, // Will be populated later if needed
         date_recorded: stats.mtime.toISOString(),
+        source_date_precision: 'exact',
+        source_date_evidence: 'filesystem-mtime',
         meeting_id: undefined,
         correlation_confidence: undefined,
         correlation_method: undefined,
@@ -489,6 +760,8 @@ export function registerRecordingHandlers(): void {
         file_size: stats.size,
         duration_seconds: undefined,
         date_recorded: stats.mtime.toISOString(),
+        source_date_precision: 'exact',
+        source_date_evidence: 'filesystem-mtime',
         meeting_id: undefined,
         correlation_confidence: undefined,
         correlation_method: undefined,
@@ -539,15 +812,25 @@ export function registerRecordingHandlers(): void {
     try {
       // Validate API key is configured before queueing
       const config = getConfig()
-      if (!config.transcription.geminiApiKey) {
+      const provider = config.transcription.provider
+      const apiKey = provider === 'openai'
+        ? config.transcription.openaiApiKey
+        : config.transcription.geminiApiKey
+      if (!apiKey) {
         return {
           success: false,
-          error: 'Transcription API key not configured. Please add your API key in Settings.'
+          error: `${provider === 'openai' ? 'OpenAI' : 'Gemini'} API key not configured. ` +
+            'Please add your API key in Settings.'
         }
       }
 
-      const queueItemId = addToQueue(recordingId)
-      updateRecordingTranscriptionStatus(recordingId, 'queued')
+      const canonicalRecordingId = resolveRecordingId(recordingId)
+      if (!canonicalRecordingId) {
+        return { success: false, error: 'Recording not found or no local file is available.' }
+      }
+
+      const queueItemId = addToQueue(canonicalRecordingId)
+      updateRecordingTranscriptionStatus(canonicalRecordingId, 'queued')
       // spec-005: Trigger immediate queue processing after adding
       processQueueManually()
       return queueItemId

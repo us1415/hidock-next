@@ -3,7 +3,7 @@ import { Play, X, AlertCircle, Download, Trash2, Wand2, Mic, FileText, RefreshCw
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { formatDate, formatDuration } from '@/lib/utils'
+import { formatDuration, formatSourceDateTime } from '@/lib/utils'
 import { Meeting, Transcript } from '@/types'
 import { UnifiedRecording, hasLocalPath } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
@@ -80,7 +80,10 @@ export const SourceRow = memo(function SourceRow({
 
   // Build secondary line: date + duration + filename (when title isn't filename)
   const secondaryParts: string[] = []
-  secondaryParts.push(formatDate(recording.dateRecorded))
+  secondaryParts.push(formatSourceDateTime(
+    recording.sourceDateValue ?? recording.dateRecorded?.toISOString(),
+    recording.sourceDatePrecision
+  ))
   if (recording.duration) {
     secondaryParts.push(formatDuration(recording.duration))
   }
@@ -115,9 +118,16 @@ export const SourceRow = memo(function SourceRow({
 
         {/* Content area — flex-1 to fill remaining space */}
         <div className="flex-1 min-w-0">
-          <p className="font-medium text-sm truncate text-foreground leading-tight">
-            {searchQuery ? highlightText(primaryText, searchQuery) : primaryText}
-          </p>
+          <div className="flex items-center gap-1.5 min-w-0">
+            <p className="font-medium text-sm truncate text-foreground leading-tight">
+              {searchQuery ? highlightText(primaryText, searchQuery) : primaryText}
+            </p>
+            {recording.reviewStatus === 'new' && (
+              <span className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">
+                New
+              </span>
+            )}
+          </div>
           <p className="text-xs text-muted-foreground truncate leading-tight mt-0.5">
             {searchQuery ? highlightText(secondaryText, searchQuery) : secondaryText}
           </p>

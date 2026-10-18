@@ -5,6 +5,19 @@ import { cancelDownloads, cancelDownloadsComplete } from '@/hooks/useDownloadOrc
 import type { UnifiedRecording } from '@/types/unified-recording'
 import { hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 
+async function getMissingTranscriptionCredentialMessage(): Promise<string | null> {
+  const providerResult = await window.electronAPI.config.getValue('transcription.provider')
+  const provider = providerResult?.success && providerResult.data === 'openai' ? 'openai' : 'gemini'
+  const keyName = provider === 'openai' ? 'openaiApiKey' : 'geminiApiKey'
+  const keyResult = await window.electronAPI.config.getValue(`transcription.${keyName}`)
+  const apiKey = keyResult?.success ? keyResult.data : null
+
+  if (!apiKey || (typeof apiKey === 'string' && apiKey.trim() === '')) {
+    return `Please configure your ${provider === 'openai' ? 'OpenAI' : 'Gemini'} API key in Settings before transcribing.`
+  }
+  return null
+}
+
 /**
  * Centralized hook for all download and transcription operations.
  *
@@ -31,12 +44,11 @@ export function useOperations() {
 
     // Check if API key is configured before queuing
     try {
-      const result = await window.electronAPI.config.getValue('transcription.geminiApiKey')
-      const apiKey = result?.success ? result.data : null
-      if (!apiKey || (typeof apiKey === 'string' && apiKey.trim() === '')) {
+      const missingCredentialMessage = await getMissingTranscriptionCredentialMessage()
+      if (missingCredentialMessage) {
         toast({
           title: 'API key required',
-          description: 'Please configure your Gemini API key in Settings before transcribing.',
+          description: missingCredentialMessage,
           variant: 'error'
         })
         return false
@@ -75,12 +87,11 @@ export function useOperations() {
 
     // Check if API key is configured before queuing
     try {
-      const result = await window.electronAPI.config.getValue('transcription.geminiApiKey')
-      const apiKey = result?.success ? result.data : null
-      if (!apiKey || (typeof apiKey === 'string' && apiKey.trim() === '')) {
+      const missingCredentialMessage = await getMissingTranscriptionCredentialMessage()
+      if (missingCredentialMessage) {
         toast({
           title: 'API key required',
-          description: 'Please configure your Gemini API key in Settings before transcribing.',
+          description: missingCredentialMessage,
           variant: 'error'
         })
         return 0
@@ -139,6 +150,14 @@ export function useOperations() {
 
   const queueDownload = useCallback(async (recording: UnifiedRecording) => {
     if (!isDeviceOnly(recording)) return false
+    if (!recording.dateRecorded) {
+      toast({
+        title: 'Recording date needs review',
+        description: 'HiDock Next will not download this recording until its original date is known.',
+        variant: 'error'
+      })
+      return false
+    }
 
     try {
       await window.electronAPI.downloadService.queueDownloads([{
@@ -146,6 +165,13 @@ export function useOperations() {
         size: recording.size,
         dateCreated: recording.dateRecorded.toISOString()
       }])
+      if (recording.reviewStatus === 'new' && recording.deviceId && window.electronAPI.deviceIngestion) {
+        await window.electronAPI.deviceIngestion.updateReviewStatus({
+          deviceId: recording.deviceId,
+          filename: recording.deviceFilename,
+          status: 'approved'
+        })
+      }
       toast({ title: 'Download started', description: recording.filename })
       return true
     } catch (e) {
@@ -156,7 +182,9 @@ export function useOperations() {
   }, [])
 
   const queueBulkDownloads = useCallback(async (recordings: UnifiedRecording[]) => {
-    const eligible = recordings.filter(isDeviceOnly)
+    const deviceOnly = recordings.filter(isDeviceOnly)
+    const eligible = deviceOnly.filter((recording) => recording.dateRecorded !== null)
+    const unknownDateCount = deviceOnly.length - eligible.length
     if (eligible.length === 0) return 0
 
     try {
@@ -164,10 +192,24 @@ export function useOperations() {
         eligible.map((r) => ({
           filename: r.deviceFilename,
           size: r.size,
-          dateCreated: r.dateRecorded.toISOString()
+          dateCreated: r.dateRecorded!.toISOString()
         }))
       )
-      toast({ title: `${eligible.length} download${eligible.length > 1 ? 's' : ''} queued` })
+      if (window.electronAPI.deviceIngestion) {
+        await Promise.all(eligible
+          .filter((recording) => recording.reviewStatus === 'new' && recording.deviceId)
+          .map((recording) => window.electronAPI.deviceIngestion.updateReviewStatus({
+            deviceId: recording.deviceId!,
+            filename: recording.deviceFilename,
+            status: 'approved'
+          })))
+      }
+      toast({
+        title: `${eligible.length} download${eligible.length > 1 ? 's' : ''} queued`,
+        description: unknownDateCount > 0
+          ? `${unknownDateCount} recording${unknownDateCount > 1 ? 's were' : ' was'} skipped because the original date is unknown.`
+          : undefined
+      })
       return eligible.length
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Unknown error'

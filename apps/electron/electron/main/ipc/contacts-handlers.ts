@@ -12,7 +12,8 @@ import {
   deleteContact,
   getMeetingsForContact,
   getContactsForMeeting,
-  Contact
+  Contact,
+  Meeting as DatabaseMeeting
 } from '../services/database'
 import { success, error, Result } from '../types/api'
 import {
@@ -80,7 +81,7 @@ export function registerContactsHandlers(): void {
 
         return success({
           contact: mapToPerson(contact),
-          meetings,
+          meetings: meetings.map(mapToMeeting),
           totalMeetingTimeMinutes
         })
       } catch (err) {
@@ -201,5 +202,18 @@ function mapToPerson(contact: Contact): Person {
     lastSeenAt: contact.last_seen_at,
     interactionCount: contact.meeting_count,
     createdAt: contact.created_at
+  }
+}
+
+function mapToMeeting(meeting: DatabaseMeeting): Meeting {
+  return {
+    ...meeting,
+    location: meeting.location ?? null,
+    organizer_name: meeting.organizer_name ?? null,
+    organizer_email: meeting.organizer_email ?? null,
+    attendees: meeting.attendees ?? null,
+    description: meeting.description ?? null,
+    recurrence_rule: meeting.recurrence_rule ?? null,
+    meeting_url: meeting.meeting_url ?? null
   }
 }

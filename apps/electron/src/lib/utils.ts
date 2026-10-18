@@ -28,6 +28,28 @@ export function formatDateTime(date: Date | string): string {
   return `${formatDate(d)} at ${formatTime(d)}`
 }
 
+export function formatSourceDateTime(
+  value: string | null | undefined,
+  precision: 'exact' | 'date-only' | 'unknown' = 'exact'
+): string {
+  if (!value || precision === 'unknown') return 'Unknown recording date'
+  if (precision === 'date-only') {
+    const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+    if (!match) return 'Unknown recording date'
+    const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    if (Number.isNaN(date.getTime())) return 'Unknown recording date'
+    const label = date.toLocaleDateString('en-US', {
+      weekday: 'short',
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric'
+    })
+    return `${label} (time unknown)`
+  }
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? 'Unknown recording date' : formatDateTime(date)
+}
+
 export function formatDuration(seconds: number): string {
   const hours = Math.floor(seconds / 3600)
   const minutes = Math.floor((seconds % 3600) / 60)
