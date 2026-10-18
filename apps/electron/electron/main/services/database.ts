@@ -7,7 +7,7 @@ import { buildRecordingMeetingWindow } from './meeting-correlation'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 28
+const SCHEMA_VERSION = 29
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -266,6 +266,7 @@ CREATE TABLE IF NOT EXISTS speaker_identities (
     display_name TEXT NOT NULL,
     contact_id TEXT,
     is_self INTEGER NOT NULL DEFAULT 0 CHECK(is_self IN (0, 1)),
+    is_priority INTEGER NOT NULL DEFAULT 0 CHECK(is_priority IN (0, 1)),
     status TEXT NOT NULL DEFAULT 'needs-review'
       CHECK(status IN ('needs-review', 'confirmed')),
     first_seen_at TEXT,
@@ -1530,6 +1531,16 @@ const MIGRATIONS: Record<number, () => void> = {
       // Fresh databases already include the column in the current schema.
     }
     database.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_speaker_identity_self ON speaker_identities(is_self) WHERE is_self = 1')
+  },
+  29: () => {
+    console.log('Running migration to schema v29: Adding priority speaker identities')
+    const database = getDatabase()
+    try {
+      database.run('ALTER TABLE speaker_identities ADD COLUMN is_priority INTEGER NOT NULL DEFAULT 0 CHECK(is_priority IN (0, 1))')
+    } catch {
+      // Fresh databases already include the column in the current schema.
+    }
+    database.run('CREATE INDEX IF NOT EXISTS idx_speaker_identity_priority ON speaker_identities(is_priority, last_seen_at)')
   }
 
 }

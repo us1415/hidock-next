@@ -7,6 +7,7 @@ import {
   mergeSpeakerIdentities,
   rebuildSpeakerIndex,
   renameSpeakerIdentity,
+  setPrioritySpeakerIdentity,
   setSelfSpeakerIdentity,
   SpeakerIdentity,
   SpeakerOverview
@@ -56,6 +57,17 @@ export function registerSpeakerHandlers(): void {
       return success(setSelfSpeakerIdentity(identityId))
     } catch (cause) {
       return failure(cause instanceof Error ? cause.message : 'Failed to set your speaker identity', cause)
+    }
+  })
+
+  ipcMain.handle('speakers:setPriority', async (_, request: { identityId?: unknown; isPriority?: unknown }): Promise<Result<SpeakerIdentity>> => {
+    if (!validId(request?.identityId) || typeof request?.isPriority !== 'boolean') {
+      return error('VALIDATION_ERROR', 'A valid speaker identity and priority are required')
+    }
+    try {
+      return success(setPrioritySpeakerIdentity(request.identityId, request.isPriority))
+    } catch (cause) {
+      return failure(cause instanceof Error ? cause.message : 'Failed to prioritize speaker identity', cause)
     }
   })
 

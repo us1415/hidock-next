@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Combine, RefreshCw, Save, UserRoundCheck } from 'lucide-react'
+import { Combine, RefreshCw, Save, Star, UserRoundCheck } from 'lucide-react'
 import type { SpeakerIdentity, SpeakerOverview } from '../../electron/preload'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -115,6 +115,22 @@ export function SpeakerIdentityManager() {
     if (result.data.available) toast.success('Voice reference ready', result.data.name)
   }
 
+  const togglePriority = async (identity: SpeakerIdentity) => {
+    const result = await window.electronAPI.speakers.setPriority({
+      identityId: identity.id,
+      isPriority: !identity.isPriority
+    })
+    if (!result.success) {
+      toast.error('Priority not saved', errorMessage(result, 'Unable to update voice priority'))
+      return
+    }
+    toast.success(
+      result.data.isPriority ? 'Priority voice saved' : 'Priority voice removed',
+      result.data.displayName
+    )
+    await load()
+  }
+
   const saveName = async (identity: SpeakerIdentity) => {
     const displayName = names[identity.id]?.trim()
     if (!displayName || displayName === identity.displayName) return
@@ -158,6 +174,7 @@ export function SpeakerIdentityManager() {
               </CardTitle>
               <p className="mt-1 text-sm text-muted-foreground">
                 Original transcript labels remain unchanged. Corrections here become reusable identity evidence.
+                Mark teammates as priority voices so they rank ahead of general recent-frequency matches.
               </p>
             </div>
             <Button variant="outline" size="sm" onClick={rebuild} disabled={loading}>
@@ -271,6 +288,16 @@ export function SpeakerIdentityManager() {
                       {identity.status === 'confirmed' ? 'Confirmed' : 'Needs review'}
                     </span>
                     {identity.isSelf && <span className="rounded bg-primary/10 px-2 py-0.5 font-medium text-primary">You</span>}
+                    <Button
+                      size="sm"
+                      variant={identity.isPriority ? 'default' : 'outline'}
+                      className="h-7 px-2 text-xs"
+                      title="Priority voices are preferred after you and exact calendar participants"
+                      onClick={() => togglePriority(identity)}
+                    >
+                      <Star className={`mr-1 h-3.5 w-3.5 ${identity.isPriority ? 'fill-current' : ''}`} />
+                      {identity.isPriority ? 'Priority voice' : 'Prioritize'}
+                    </Button>
                     <span className="text-muted-foreground">• {identity.occurrenceCount} transcripts •</span>
                     {identity.aliases.map((alias) => (
                       <span key={alias.id} className="rounded bg-muted px-2 py-0.5" title="Original transcript label">

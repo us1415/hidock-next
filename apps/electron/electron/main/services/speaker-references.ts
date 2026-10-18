@@ -95,11 +95,47 @@ export function selectKnownSpeakerIdentityIds(meetings: CandidateMeeting[], limi
   if (keys.length > 0 && selected.length < safeLimit) {
     const placeholders = keys.map(() => '?').join(',')
     const matches = queryAll<{ id: string }>(`
-      SELECT id FROM speaker_identities
-      WHERE status = 'confirmed' AND canonical_key IN (${placeholders})
-      ORDER BY display_name COLLATE NOCASE
+      WITH latest AS (SELECT MAX(recorded_at) AS recorded_at FROM speaker_occurrences)
+      SELECT i.id
+      FROM speaker_identities i
+      LEFT JOIN contacts c ON c.id = i.contact_id
+      LEFT JOIN speaker_aliases a ON a.identity_id = i.id
+      LEFT JOIN speaker_occurrences o ON o.alias_id = a.id
+      CROSS JOIN latest
+      WHERE i.status = 'confirmed' AND i.canonical_key IN (${placeholders})
+      GROUP BY i.id
+      ORDER BY
+        CASE WHEN i.is_priority = 1 OR c.type = 'team' THEN 1 ELSE 0 END DESC,
+        SUM(CASE WHEN julianday(o.recorded_at) >= julianday(latest.recorded_at, '-90 days') THEN 1 ELSE 0 END) DESC,
+        COUNT(o.id) DESC,
+        MAX(o.recorded_at) DESC,
+        i.display_name COLLATE NOCASE
     `, keys)
     for (const match of matches) if (!selected.includes(match.id)) selected.push(match.id)
+  }
+
+  if (selected.length < safeLimit) {
+    const ranked = queryAll<{ id: string }>(`
+      WITH latest AS (SELECT MAX(recorded_at) AS recorded_at FROM speaker_occurrences)
+      SELECT i.id
+      FROM speaker_identities i
+      LEFT JOIN contacts c ON c.id = i.contact_id
+      LEFT JOIN speaker_aliases a ON a.identity_id = i.id
+      LEFT JOIN speaker_occurrences o ON o.alias_id = a.id
+      CROSS JOIN latest
+      WHERE i.status = 'confirmed' AND i.is_self = 0
+      GROUP BY i.id
+      ORDER BY
+        CASE WHEN i.is_priority = 1 OR c.type = 'team' THEN 1 ELSE 0 END DESC,
+        SUM(CASE WHEN julianday(o.recorded_at) >= julianday(latest.recorded_at, '-90 days') THEN 1 ELSE 0 END) DESC,
+        COUNT(o.id) DESC,
+        MAX(o.recorded_at) DESC,
+        i.display_name COLLATE NOCASE
+    `)
+    for (const candidate of ranked) {
+      if (!selected.includes(candidate.id)) selected.push(candidate.id)
+      if (selected.length >= safeLimit) break
+    }
   }
   return selected.slice(0, safeLimit)
 }

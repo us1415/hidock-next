@@ -22,6 +22,7 @@ import {
   mergeSpeakerIdentities,
   rebuildSpeakerIndex,
   renameSpeakerIdentity,
+  setPrioritySpeakerIdentity,
   setSelfSpeakerIdentity
 } from '../speaker-identities'
 import { extractSpeakerReferenceCandidates, selectKnownSpeakerIdentityIds } from '../speaker-references'
@@ -80,6 +81,10 @@ describe('speaker identity evidence index', () => {
 
     const joel = overview.identities.find((identity) => identity.displayName === 'Joel K')!
     expect(setSelfSpeakerIdentity(joel.id, '2026-10-18T12:00:45.000Z')).toMatchObject({ isSelf: true })
+    const joeyBeforeMerge = overview.identities.find((identity) => identity.displayName === 'Joey A')!
+    expect(setPrioritySpeakerIdentity(joeyBeforeMerge.id, true, '2026-10-18T12:00:46.000Z'))
+      .toMatchObject({ isPriority: true })
+    expect(selectKnownSpeakerIdentityIds([])).toEqual([joel.id, joeyBeforeMerge.id])
     expect(extractSpeakerReferenceCandidates('Joel K  00:00\nHello\nSpeaker 1  00:10\nHi', 'Joel K'))
       .toEqual([{ startSeconds: 0.25, endSeconds: 8.25, durationSeconds: 8 }])
     expect(selectKnownSpeakerIdentityIds([{ organizer_name: 'Joey A' }])).toEqual([
@@ -91,7 +96,8 @@ describe('speaker identity evidence index', () => {
     expect(overview.identities.find((identity) => identity.id === joel.id)).toMatchObject({
       displayName: 'Joel Khan',
       status: 'confirmed',
-      isSelf: true
+      isSelf: true,
+      isPriority: false
     })
 
     const unresolved = overview.unresolvedAliases[0]
@@ -106,6 +112,7 @@ describe('speaker identity evidence index', () => {
       .toEqual(['Joel K', 'Joey A', 'joel k.'])
     expect(overview.identities[0]).toMatchObject({
       displayName: 'Joel Khan',
+      isPriority: true,
       firstSeenAt: '2026-01-01T15:00:00.000Z',
       lastSeenAt: '2026-02-01T15:00:00.000Z'
     })

@@ -17,6 +17,7 @@ export interface SpeakerIdentity {
   status: 'needs-review' | 'confirmed'
   contactId: string | null
   isSelf: boolean
+  isPriority: boolean
   firstSeenAt: string | null
   lastSeenAt: string | null
   occurrenceCount: number
@@ -51,6 +52,7 @@ interface IdentityRow {
   display_name: string
   contact_id: string | null
   is_self: number
+  is_priority: number
   status: 'needs-review' | 'confirmed'
   first_seen_at: string | null
   last_seen_at: string | null
@@ -193,6 +195,7 @@ export function getSpeakerOverview(): SpeakerOverview {
       status: identity.status,
       contactId: identity.contact_id,
       isSelf: identity.is_self === 1,
+      isPriority: identity.is_priority === 1,
       firstSeenAt: identity.first_seen_at,
       lastSeenAt: identity.last_seen_at,
       occurrenceCount: identityAliases.reduce((total, alias) => total + alias.occurrenceCount, 0),
@@ -220,12 +223,17 @@ export function getSpeakerOverview(): SpeakerOverview {
 export function getConfirmedSpeakerNameHints(limit = 40): string[] {
   const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 40, 100))
   return queryAll<{ display_name: string }>(`
+    WITH latest AS (SELECT MAX(recorded_at) AS recorded_at FROM speaker_occurrences)
     SELECT i.display_name
     FROM speaker_identities i
     LEFT JOIN speaker_aliases a ON a.identity_id = i.id
+    LEFT JOIN speaker_occurrences o ON o.alias_id = a.id
+    CROSS JOIN latest
     WHERE i.status = 'confirmed'
     GROUP BY i.id, i.display_name
-    ORDER BY COALESCE(SUM(a.occurrence_count), 0) DESC, i.display_name COLLATE NOCASE
+    ORDER BY i.is_self DESC, i.is_priority DESC,
+      SUM(CASE WHEN julianday(o.recorded_at) >= julianday(latest.recorded_at, '-90 days') THEN 1 ELSE 0 END) DESC,
+      COUNT(o.id) DESC, MAX(o.recorded_at) DESC, i.display_name COLLATE NOCASE
     LIMIT ?
   `, [safeLimit]).map((row) => row.display_name)
 }
@@ -270,6 +278,20 @@ export function setSelfSpeakerIdentity(identityId: string, now = new Date().toIS
   return getSpeakerOverview().identities.find((item) => item.id === identityId)!
 }
 
+export function setPrioritySpeakerIdentity(
+  identityId: string,
+  isPriority: boolean,
+  now = new Date().toISOString()
+): SpeakerIdentity {
+  const identity = queryOne<IdentityRow>('SELECT * FROM speaker_identities WHERE id = ?', [identityId])
+  if (!identity) throw new Error('Speaker identity not found.')
+  getDatabase().run(
+    "UPDATE speaker_identities SET is_priority = ?, status = 'confirmed', updated_at = ? WHERE id = ?",
+    [isPriority ? 1 : 0, now, identityId]
+  )
+  return getSpeakerOverview().identities.find((item) => item.id === identityId)!
+}
+
 export function mergeSpeakerIdentities(sourceId: string, targetId: string, now = new Date().toISOString()): SpeakerIdentity {
   if (sourceId === targetId) throw new Error('Choose two different speaker identities.')
   const source = queryOne<IdentityRow>('SELECT * FROM speaker_identities WHERE id = ?', [sourceId])
@@ -277,15 +299,22 @@ export function mergeSpeakerIdentities(sourceId: string, targetId: string, now =
   if (!source || !target) throw new Error('Speaker identity not found.')
   runInTransaction(() => {
     const database = getDatabase()
+    const preserveSelf = source.is_self === 1 || target.is_self === 1
+    const preservePriority = source.is_priority === 1 || target.is_priority === 1
     database.run('UPDATE speaker_aliases SET identity_id = ?, updated_at = ? WHERE identity_id = ?', [targetId, now, sourceId])
+    if (source.is_self === 1 && target.is_self !== 1) {
+      database.run('UPDATE speaker_identities SET is_self = 0, updated_at = ? WHERE id = ?', [now, sourceId])
+    }
     database.run(`
       UPDATE speaker_identities SET
         status = 'confirmed',
+        is_self = ?,
+        is_priority = ?,
         first_seen_at = (SELECT MIN(first_seen_at) FROM speaker_aliases WHERE identity_id = ?),
         last_seen_at = (SELECT MAX(last_seen_at) FROM speaker_aliases WHERE identity_id = ?),
         updated_at = ?
       WHERE id = ?
-    `, [targetId, targetId, now, targetId])
+    `, [preserveSelf ? 1 : 0, preservePriority ? 1 : 0, targetId, targetId, now, targetId])
     database.run('DELETE FROM speaker_identities WHERE id = ?', [sourceId])
   })
   return getSpeakerOverview().identities.find((identity) => identity.id === targetId)!
