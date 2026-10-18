@@ -2,6 +2,8 @@ import { app, safeStorage } from 'electron'
 import { join } from 'path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 
+export const SENSITIVE_CONFIG_MASK = '••••••••'
+
 // CS-007: Encrypt sensitive config values (ICS URL) at rest using Electron safeStorage
 function encryptSensitive(value: string): string {
   try {
@@ -34,9 +36,12 @@ export interface AppConfig {
     lastSyncAt: string | null
   }
   transcription: {
-    provider: 'gemini'
+    provider: 'gemini' | 'openai'
     geminiApiKey: string
     geminiModel: string
+    openaiApiKey: string
+    openaiTranscriptionModel: string
+    openaiAnalysisModel: string
     autoTranscribe: boolean
     language: string
   }
@@ -68,7 +73,7 @@ export interface AppConfig {
 }
 
 const DEFAULT_CONFIG: AppConfig = {
-  version: '1.0.0',
+  version: '1.1.0',
   storage: {
     dataPath: join(app.getPath('home'), 'HiDock'),
     maxRecordingsGB: 50
@@ -83,7 +88,10 @@ const DEFAULT_CONFIG: AppConfig = {
     provider: 'gemini',
     geminiApiKey: '',
     geminiModel: 'gemini-3-pro-preview', // Best model for audio transcription
-    autoTranscribe: true,
+    openaiApiKey: '',
+    openaiTranscriptionModel: 'gpt-transcribe',
+    openaiAnalysisModel: 'gpt-6-luna',
+    autoTranscribe: false,
     language: 'es'
   },
   embeddings: {
@@ -101,7 +109,7 @@ const DEFAULT_CONFIG: AppConfig = {
   },
   device: {
     autoConnect: true,
-    autoDownload: true
+    autoDownload: false
   },
   ui: {
     theme: 'system',
@@ -134,8 +142,22 @@ export async function initializeConfig(): Promise<void> {
       if (savedConfig.calendar?.icsUrl) {
         savedConfig.calendar.icsUrl = decryptSensitive(savedConfig.calendar.icsUrl)
       }
+      if (savedConfig.transcription?.geminiApiKey) {
+        savedConfig.transcription.geminiApiKey = decryptSensitive(savedConfig.transcription.geminiApiKey)
+      }
+      if (savedConfig.transcription?.openaiApiKey) {
+        savedConfig.transcription.openaiApiKey = decryptSensitive(savedConfig.transcription.openaiApiKey)
+      }
       // Merge with defaults to handle new fields
       config = deepMerge(DEFAULT_CONFIG, savedConfig)
+      // v1.1 safety migration: earlier builds enabled bulk device download and
+      // paid transcription by default. Require the user to opt into each one.
+      if (savedConfig.version === '1.0.0') {
+        config.version = '1.1.0'
+        config.device.autoDownload = false
+        config.transcription.autoTranscribe = false
+        await saveConfig(config)
+      }
     } else {
       // Create config file with defaults
       await saveConfig(DEFAULT_CONFIG)
@@ -148,6 +170,18 @@ export async function initializeConfig(): Promise<void> {
 
 export function getConfig(): AppConfig {
   return { ...config }
+}
+
+/** Return renderer-safe settings without disclosing saved API keys. */
+export function getPublicConfig(): AppConfig {
+  return {
+    ...config,
+    transcription: {
+      ...config.transcription,
+      geminiApiKey: config.transcription.geminiApiKey ? SENSITIVE_CONFIG_MASK : '',
+      openaiApiKey: config.transcription.openaiApiKey ? SENSITIVE_CONFIG_MASK : ''
+    }
+  }
 }
 
 export async function saveConfig(newConfig: Partial<AppConfig>): Promise<void> {
@@ -166,6 +200,11 @@ export async function saveConfig(newConfig: Partial<AppConfig>): Promise<void> {
     calendar: {
       ...config.calendar,
       icsUrl: encryptSensitive(config.calendar.icsUrl)
+    },
+    transcription: {
+      ...config.transcription,
+      geminiApiKey: encryptSensitive(config.transcription.geminiApiKey),
+      openaiApiKey: encryptSensitive(config.transcription.openaiApiKey)
     }
   }
   writeFileSync(configPath, JSON.stringify(toWrite, null, 2))

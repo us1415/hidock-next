@@ -1,4 +1,6 @@
-import { ipcMain, shell } from 'electron'
+import { mkdirSync } from 'fs'
+import { join } from 'path'
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import {
   getStorageInfo,
   getRecordingsPath,
@@ -13,8 +15,11 @@ import {
   getMeetings,
   linkRecordingToMeeting,
   addSyncedFile,
+  saveDatabase,
   type Recording
 } from '../services/database'
+import { getDataPath } from '../services/config'
+import { createPortableBackup, stagePortableRestore, validatePortableBackup } from '../services/portable-backup'
 import {
   OpenFolderSchema,
   ReadRecordingFileSchema,
@@ -95,6 +100,100 @@ export function registerStorageHandlers(): void {
     }
   })
 
+  ipcMain.handle('storage:create-backup', async (event) => {
+    try {
+      const win = BrowserWindow.fromWebContents(event.sender) || BrowserWindow.getFocusedWindow()
+      const options = {
+        title: 'Choose where to create the HiDock Next backup',
+        properties: ['openDirectory', 'createDirectory'] as Array<'openDirectory' | 'createDirectory'>
+      }
+      const selection = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+      if (selection.canceled || !selection.filePaths[0]) return { success: false, canceled: true }
+
+      saveDatabase()
+      const result = await createPortableBackup(selection.filePaths[0])
+      return {
+        success: true,
+        backupPath: result.backupPath,
+        fileCount: result.manifest.files.length,
+        totalBytes: result.manifest.files.reduce((total, file) => total + file.size, 0)
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Backup failed.'
+      console.error('storage:create-backup error:', error)
+      return { success: false, error: message }
+    }
+  })
+
+  ipcMain.handle('storage:validate-backup', async (event) => {
+    try {
+      const win = BrowserWindow.fromWebContents(event.sender) || BrowserWindow.getFocusedWindow()
+      const options = {
+        title: 'Choose a HiDock Next backup to validate',
+        properties: ['openDirectory'] as Array<'openDirectory'>
+      }
+      const selection = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+      if (selection.canceled || !selection.filePaths[0]) return { success: false, canceled: true }
+
+      const validation = await validatePortableBackup(selection.filePaths[0])
+      return { success: validation.valid, validation, error: validation.valid ? undefined : 'Backup validation failed.' }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Backup validation failed.'
+      console.error('storage:validate-backup error:', error)
+      return { success: false, error: message }
+    }
+  })
+
+  ipcMain.handle('storage:restore-backup', async (event) => {
+    try {
+      const win = BrowserWindow.fromWebContents(event.sender) || BrowserWindow.getFocusedWindow()
+      const options = {
+        title: 'Choose a HiDock Next backup to restore',
+        properties: ['openDirectory'] as Array<'openDirectory'>
+      }
+      const selection = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+      if (selection.canceled || !selection.filePaths[0]) return { success: false, canceled: true }
+
+      const backupPath = selection.filePaths[0]
+      const validation = await validatePortableBackup(backupPath)
+      if (!validation.valid) {
+        return { success: false, error: validation.errors[0] || 'Backup validation failed.', validation }
+      }
+
+      const confirmationOptions = {
+        type: 'warning' as const,
+        title: 'Restore HiDock Next backup?',
+        message: 'Replace the current library with this backup?',
+        detail:
+          `The validated backup contains ${validation.fileCount} files. HiDock Next will first create a safety ` +
+          'backup of the current library, then restart and apply the replacement. API keys will not be changed.',
+        buttons: ['Cancel', 'Replace and Restart'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true
+      }
+      const confirmation = win
+        ? await dialog.showMessageBox(win, confirmationOptions)
+        : await dialog.showMessageBox(confirmationOptions)
+      if (confirmation.response !== 1) return { success: false, canceled: true }
+
+      saveDatabase()
+      const dataPath = getDataPath()
+      const safetyParent = join(dataPath, 'restore-safety')
+      mkdirSync(safetyParent, { recursive: true })
+      const safetyBackup = await createPortableBackup(safetyParent)
+      await stagePortableRestore(backupPath, dataPath, safetyBackup.backupPath)
+
+      app.relaunch()
+      app.quit()
+      return { success: true, restarting: true, safetyBackupPath: safetyBackup.backupPath }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Restore preparation failed.'
+      console.error('storage:restore-backup error:', error)
+      return { success: false, error: message }
+    }
+  })
+
   // Open folder in file explorer
   ipcMain.handle('storage:open-folder', async (_, folder: unknown) => {
     try {
@@ -160,7 +259,8 @@ export function registerStorageHandlers(): void {
   })
 
   // Save recording from device and add to database/transcription queue
-  // recordingDateIso is the original recording date from the device (optional)
+  // recordingDateIso is the original recording date from the device. If it is
+  // absent, the HiDock filename must contain a recoverable timestamp.
   ipcMain.handle('storage:save-recording', async (_, filename: unknown, data: unknown, recordingDateIso?: string) => {
     try {
       const result = SaveRecordingSchema.safeParse({ filename, data })
@@ -170,24 +270,36 @@ export function registerStorageHandlers(): void {
 
       // Parse the original recording date if provided
       let originalDate: Date | undefined
+      let sourceDateEvidence: 'hidock-device' | 'hidock-filename' | undefined
       if (recordingDateIso) {
         originalDate = new Date(recordingDateIso)
         if (isNaN(originalDate.getTime())) {
           console.warn('Invalid recording date provided:', recordingDateIso)
           originalDate = undefined
+        } else {
+          sourceDateEvidence = 'hidock-device'
         }
       }
 
       // If no date was passed, try to parse from HiDock filename formats
       if (!originalDate) {
         originalDate = parseHiDockFilenameDate(result.data.filename)
+        if (originalDate) sourceDateEvidence = 'hidock-filename'
+      }
+
+      // Never turn an ingestion timestamp into a recording timestamp. Unknown
+      // source chronology must be resolved before a device download is saved.
+      if (!originalDate || !sourceDateEvidence) {
+        return {
+          success: false,
+          error: 'The original recording date is unknown. Review the device metadata before downloading this file.'
+        }
       }
 
       const buffer = Buffer.from(result.data.data)
       const filePath = await saveRecording(result.data.filename, buffer, undefined, originalDate)
 
-      // Use the parsed date or fall back to current time
-      const dateRecorded = originalDate?.toISOString() || new Date().toISOString()
+      const dateRecorded = originalDate.toISOString()
 
       // Generate ID from filename
       const recordingId = `rec_${result.data.filename.replace(/[^a-zA-Z0-9]/g, '_')}`
@@ -201,6 +313,8 @@ export function registerStorageHandlers(): void {
         file_size: buffer.length,
         duration_seconds: undefined, // Will be calculated after processing
         date_recorded: dateRecorded,
+        source_date_precision: 'exact',
+        source_date_evidence: sourceDateEvidence,
         meeting_id: undefined,
         correlation_confidence: undefined,
         correlation_method: undefined,

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { getRelativeTime, formatDateTime, formatDuration, formatBytes, validateId } from '../utils'
+import { getRelativeTime, formatDateTime, formatDuration, formatBytes, formatSourceDateTime, validateId } from '../utils'
 
 describe('getRelativeTime', () => {
   it('should return "Just now" for dates less than 1 minute ago', () => {
@@ -48,6 +48,19 @@ describe('formatDateTime', () => {
   it('should accept string dates', () => {
     const result = formatDateTime('2026-03-01T14:30:00')
     expect(result).toContain('Mar')
+  })
+})
+
+describe('formatSourceDateTime', () => {
+  it('renders date-only evidence without manufacturing a time or timezone shift', () => {
+    const result = formatSourceDateTime('2026-02-12', 'date-only')
+    expect(result).toContain('Feb 12, 2026')
+    expect(result).toContain('time unknown')
+    expect(result).not.toContain('at')
+  })
+
+  it('renders unknown evidence explicitly', () => {
+    expect(formatSourceDateTime(null, 'unknown')).toBe('Unknown recording date')
   })
 })
 

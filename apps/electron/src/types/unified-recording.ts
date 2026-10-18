@@ -23,7 +23,12 @@ interface RecordingBase {
   filename: string
   size: number
   duration: number
-  dateRecorded: Date
+  /** Authoritative source timestamp. Null means unknown; never substitute ingestion time. */
+  dateRecorded: Date | null
+  /** Original database value, retained so a date-only source never acquires a synthetic timezone/time. */
+  sourceDateValue?: string | null
+  sourceDatePrecision?: 'exact' | 'date-only' | 'unknown'
+  sourceDateEvidence?: string
   transcriptionStatus: 'none' | 'pending' | 'processing' | 'complete' | 'error'
   meetingId?: string
   meetingSubject?: string
@@ -35,6 +40,9 @@ interface RecordingBase {
   category?: string
   status?: string
   summary?: string
+  /** Per-device, opt-in review state. It never starts a download or transcription by itself. */
+  reviewStatus?: 'new' | 'approved' | 'dismissed'
+  deviceId?: string
 }
 
 /**

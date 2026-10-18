@@ -3,6 +3,7 @@ import { registerDatabaseHandlers } from './database-handlers'
 import { registerCalendarHandlers } from './calendar-handlers'
 import { registerStorageHandlers } from './storage-handlers'
 import { registerRecordingHandlers } from './recording-handlers'
+import { registerImportHandlers } from './import-handlers'
 import { registerRAGHandlers } from './rag-handlers'
 import { registerAppHandlers } from './app-handlers'
 import { registerContactsHandlers } from './contacts-handlers'
@@ -19,6 +20,7 @@ import { registerActionablesHandlers } from './actionables-handlers'
 import { registerMeetingsHandlers } from './meetings-handlers'
 
 export function registerIpcHandlers(): void {
+  registerImportHandlers()
   // Register all IPC handlers
   registerConfigHandlers()
   registerDatabaseHandlers()

@@ -615,9 +615,11 @@ export function Calendar() {
     filtered.sort((a, b) => {
       switch (sortBy) {
         case 'date-desc':
-          return b.dateRecorded.getTime() - a.dateRecorded.getTime()
+          return (b.dateRecorded?.getTime() ?? Number.NEGATIVE_INFINITY) -
+            (a.dateRecorded?.getTime() ?? Number.NEGATIVE_INFINITY)
         case 'date-asc':
-          return a.dateRecorded.getTime() - b.dateRecorded.getTime()
+          return (a.dateRecorded?.getTime() ?? Number.POSITIVE_INFINITY) -
+            (b.dateRecorded?.getTime() ?? Number.POSITIVE_INFINITY)
         case 'name-asc':
           return a.filename.localeCompare(b.filename)
         case 'name-desc':
@@ -796,10 +798,10 @@ export function Calendar() {
 
                       {/* Date */}
                       <div className="text-xs font-medium">
-                        {formatShortDate(recording.dateRecorded)}
+                        {recording.dateRecorded ? formatShortDate(recording.dateRecorded) : 'Unknown date'}
                       </div>
                       <div className="text-xs text-muted-foreground">
-                        {formatShortTime(recording.dateRecorded)}
+                        {recording.dateRecorded ? formatShortTime(recording.dateRecorded) : 'Unknown time'}
                       </div>
 
                       {/* Duration */}
@@ -914,12 +916,12 @@ export function Calendar() {
 
                       {/* Date */}
                       <span className="w-20 flex-shrink-0 text-muted-foreground text-xs">
-                        {formatShortDate(recording.dateRecorded)}
+                        {recording.dateRecorded ? formatShortDate(recording.dateRecorded) : 'Unknown date'}
                       </span>
 
                       {/* Time */}
                       <span className="w-16 flex-shrink-0 text-muted-foreground text-xs">
-                        {formatShortTime(recording.dateRecorded)}
+                        {recording.dateRecorded ? formatShortTime(recording.dateRecorded) : 'Unknown time'}
                       </span>
 
                       {/* Filename */}

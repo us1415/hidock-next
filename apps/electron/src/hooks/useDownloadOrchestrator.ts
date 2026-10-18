@@ -23,6 +23,7 @@ interface DownloadQueueItem {
   progress: number
   status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
   error?: string
+  recordingDate?: Date | string
 }
 
 // DL-14: Module-level abort controller ref so cancelDownloads can be called from outside the hook
@@ -286,6 +287,20 @@ export function useDownloadOrchestrator() {
     // instead of just invalidating (which only refreshes cached data)
     if (completed > 0) {
       window.dispatchEvent(new CustomEvent('hidock:downloads-completed'))
+    }
+
+    if (completed > 0 && failed === 0 && !aborted && window.electronAPI.deviceIngestion) {
+      const deviceState = deviceService.getState()
+      const identity = deviceState.serialNumber?.trim() || deviceState.model
+      if (identity && identity !== 'unknown') {
+        const deviceId = `hidock:${identity.replace(/[^A-Za-z0-9._-]/g, '_')}`
+        const latestSyncedRecordedAt = pendingItems
+          .map((item) => item.recordingDate ? new Date(item.recordingDate).toISOString() : null)
+          .filter((value): value is string => Boolean(value))
+          .sort()
+          .at(-1) ?? null
+        await window.electronAPI.deviceIngestion.markSyncSuccess({ deviceId, latestSyncedRecordedAt })
+      }
     }
 
     if (completed > 0 || failed > 0 || aborted) {

@@ -89,7 +89,7 @@ describe('Activity Log Integration - Spec Compliance', () => {
       // Actual: No such call exists
 
       const fileCount = 5
-      emitActivityLog('success', 'Found 5 files on device', '5 recordings available')
+      emitActivityLog('success', `Found ${fileCount} files on device`, `${fileCount} recordings available`)
 
       expect(sentMessages).toHaveLength(1)
       expect(sentMessages[0]).toMatchObject({

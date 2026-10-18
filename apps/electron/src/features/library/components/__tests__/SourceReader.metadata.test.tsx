@@ -9,16 +9,20 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { SourceReader } from '../SourceReader'
 import type { UnifiedRecording } from '@/types/unified-recording'
-import type { Meeting } from '@/types'
+import type { Meeting, Transcript } from '@/types'
 
 // ---------------------------------------------------------------------------
 // Mock electronAPI
 // ---------------------------------------------------------------------------
 const mockKnowledgeUpdate = vi.fn().mockResolvedValue({ success: true })
 const mockSelectMeeting = vi.fn().mockResolvedValue({ success: true })
+const mockTranscriptExport = vi.fn().mockResolvedValue({
+  success: true,
+  filePath: 'C:\\exports\\meeting-transcript.pdf'
+})
 
 // Silence @radix-ui portal issues in jsdom
 vi.mock('@radix-ui/react-portal', () => ({
@@ -145,6 +149,9 @@ beforeEach(() => {
         getCandidates: vi.fn().mockResolvedValue({ success: true, data: [] }),
         getMeetingsNearDate: vi.fn().mockResolvedValue({ success: true, data: [] }),
       },
+      transcripts: {
+        export: mockTranscriptExport,
+      },
     },
     writable: true,
     configurable: true,
@@ -163,6 +170,82 @@ describe('SourceReader — metadata editing', () => {
 
     expect(screen.getByText('My Recording Title')).toBeInTheDocument()
     expect(screen.queryByRole('textbox', { name: /recording title/i })).not.toBeInTheDocument()
+  })
+
+  it('uses the same transcript title as the source list and keeps the filename as metadata', () => {
+    const rec = makeRecording({ title: undefined })
+    const transcript = {
+      title_suggestion: 'Vendor Direct Portal and Intake Planning'
+    } as Transcript
+
+    render(<SourceReader recording={rec} transcript={transcript} />)
+
+    expect(screen.getByRole('heading', { name: 'Vendor Direct Portal and Intake Planning' })).toBeInTheDocument()
+    expect(screen.getByText('meeting-2024.wav')).toBeInTheDocument()
+  })
+
+  it('shows an unknown source date instead of manufacturing the current time', () => {
+    render(<SourceReader recording={makeRecording({ dateRecorded: null })} />)
+
+    expect(screen.getByText('Unknown recording date')).toBeInTheDocument()
+  })
+
+  it('exports the selected transcript as PDF through the safe preload API', async () => {
+    const rec = makeRecording({ id: 'rec-pdf', transcriptionStatus: 'complete' })
+    const transcript = {
+      id: 'transcript-pdf',
+      recording_id: 'rec-pdf',
+      full_text: 'Transcript text'
+    } as Transcript
+
+    render(<SourceReader recording={rec} transcript={transcript} />)
+    fireEvent.click(screen.getByRole('button', { name: /export pdf/i }))
+
+    await waitFor(() => {
+      expect(mockTranscriptExport).toHaveBeenCalledWith('rec-pdf', 'pdf')
+    })
+  })
+
+  it('marks a new device recording reviewed without invoking a download or transcription', () => {
+    const onReviewStatusChange = vi.fn()
+    const onDownload = vi.fn()
+    const onTranscribe = vi.fn()
+    const rec = makeRecording({
+      location: 'device-only',
+      deviceFilename: 'meeting-2024.hda',
+      deviceId: 'hidock:P1-test',
+      reviewStatus: 'new'
+    })
+
+    render(
+      <SourceReader
+        recording={rec}
+        onReviewStatusChange={onReviewStatusChange}
+        onDownload={onDownload}
+        onTranscribe={onTranscribe}
+        deviceConnected
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /mark reviewed/i }))
+
+    expect(onReviewStatusChange).toHaveBeenCalledWith('dismissed')
+    expect(onDownload).not.toHaveBeenCalled()
+    expect(onTranscribe).not.toHaveBeenCalled()
+  })
+
+  it('can return a dismissed recording to the review queue', () => {
+    const onReviewStatusChange = vi.fn()
+    const rec = makeRecording({
+      deviceFilename: 'meeting-2024.hda',
+      deviceId: 'hidock:P1-test',
+      reviewStatus: 'dismissed'
+    })
+
+    render(<SourceReader recording={rec} onReviewStatusChange={onReviewStatusChange} />)
+    fireEvent.click(screen.getByRole('button', { name: /add to review/i }))
+
+    expect(onReviewStatusChange).toHaveBeenCalledWith('new')
   })
 
   // 2. Pencil icon visible on hover when knowledgeCaptureId present

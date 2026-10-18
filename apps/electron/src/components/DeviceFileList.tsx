@@ -166,7 +166,7 @@ function DeviceFileRow({
   )
 }
 
-export function DeviceFileList({ recordings, syncedFilenames, onRefresh, onRecordingsRefresh }: DeviceFileListProps) {
+export function DeviceFileList({ recordings, onRefresh, onRecordingsRefresh }: DeviceFileListProps) {
   const deviceService = getHiDockDeviceService()
   const [downloadErrors, setDownloadErrors] = useState<Map<string, string>>(new Map())
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
@@ -292,7 +292,7 @@ export function DeviceFileList({ recordings, syncedFilenames, onRefresh, onRecor
   if (deviceRecordings.length === 0) return null
 
   const recordingToDelete = deviceRecordings.find(r => r.deviceFilename === fileToDelete)
-  const hasLocalCopy = recordingToDelete?.location === 'both' || recordingToDelete?.location === 'local-only'
+  const hasLocalCopy = recordingToDelete?.location === 'both'
 
   // FL-005: Batch download
   const selectedUndownloaded = sortedRecordings.filter(

@@ -116,9 +116,8 @@ export interface CardInfo {
 /**
  * Calculate recording duration based on file version and length.
  *
- * IMPORTANT: Matches the Python desktop app's _calculate_file_duration() which applies
- * a 4x correction factor to all calculations. The device reports compressed/encoded
- * file sizes, so the formula must account for the actual audio bitrate.
+ * File versions describe different encodings, so duration is derived from each
+ * format's actual byte rate.
  *
  * Audio format constants (from Python):
  * - CHANNELS = 2 (stereo)
@@ -129,10 +128,10 @@ export interface CardInfo {
  * - Version 1: Custom compressed format: (bytes/32)*2*4 = bytes/4
  * - Version 2: 48kHz stereo 8-bit WAV with 4x correction
  * - Version 3: 24kHz stereo 8-bit WAV with 4x correction
- * - Version 5: 12kHz format with 4x correction
+ * - Version 5: P1 MP3 at 96 kbps (12,000 bytes/second)
  * - Default: 16kHz stereo 8-bit with 4x correction
  */
-function calculateDurationSeconds(fileLength: number, fileVersion: number): number {
+export function calculateDurationSeconds(fileLength: number, fileVersion: number): number {
   if (shouldLogProtocol()) console.log(`[Jensen] calculateDurationSeconds: fileLength=${fileLength}, fileVersion=${fileVersion}`)
 
   const WAV_HEADER_SIZE = 44
@@ -164,10 +163,11 @@ function calculateDurationSeconds(fileLength: number, fileVersion: number): numb
     if (shouldLogProtocol()) console.log(`[Jensen] Version 3 duration: ${duration} seconds`)
     return duration
   } else if (fileVersion === 5) {
-    // Version 5: 12kHz format with 4x correction
-    // Python: (file_size / 12000) * 4 = file_size / 3000
-    const effectiveBps = 12000 / CORRECTION_FACTOR  // 3000
-    const duration = Math.round(fileLength / effectiveBps)
+    // P1 .hda files contain 96 kbps MP3 audio: 96,000 bits/second =
+    // 12,000 bytes/second. The legacy desktop formula applied an additional
+    // 4x multiplier and consequently displayed durations four times too long.
+    const bytesPerSecond = 12000
+    const duration = Math.round(fileLength / bytesPerSecond)
     if (shouldLogProtocol()) console.log(`[Jensen] Version 5 duration: ${duration} seconds`)
     return duration
   } else {
@@ -489,7 +489,7 @@ export class JensenDevice {
 
       device = devices.find(
         (d) => USB_VENDOR_IDS.includes(d.vendorId) && d.productName?.toLowerCase().includes('hidock')
-      )
+      ) ?? null
 
       if (!device) {
         if (shouldLogProtocol()) console.log('connect: No authorized HiDock found, showing device picker')

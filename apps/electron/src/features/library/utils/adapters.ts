@@ -51,7 +51,8 @@ export function unifiedRecordingToAudioSource(recording: UnifiedRecording): Audi
     id: recording.id,
     type: 'audio',
     title: recording.title || recording.filename,
-    capturedAt: recording.dateRecorded.toISOString(),
+    capturedAt: recording.sourceDateValue ?? recording.dateRecorded?.toISOString() ?? null,
+    capturedAtPrecision: recording.sourceDatePrecision,
     location,
     processingStatus,
     filename: recording.filename,
@@ -102,6 +103,7 @@ export function getSourceDisplayTitle(source: AudioSource): string {
  * Get a formatted date string for a source
  */
 export function getSourceDateDisplay(source: AudioSource): string {
+  if (!source.capturedAt) return 'Unknown recording date'
   const date = new Date(source.capturedAt)
   return date.toLocaleDateString(undefined, {
     year: 'numeric',

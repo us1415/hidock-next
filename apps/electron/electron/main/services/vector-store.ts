@@ -200,6 +200,15 @@ class VectorStore {
       }
     }
 
+    // Check the local provider once per indexing job. Without this guard, an
+    // offline Ollama instance causes one failed fetch and full stack trace for
+    // every transcript chunk even though indexing cannot succeed.
+    const ollama = getOllamaService()
+    if (!await ollama.isAvailable()) {
+      console.warn('[VectorStore] Ollama unavailable; skipping transcript indexing')
+      return 0
+    }
+
     // Chunk the transcript
     const chunks = chunkText(transcript)
     let indexed = 0

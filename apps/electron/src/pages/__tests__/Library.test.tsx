@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { Library } from '../Library'
@@ -324,6 +324,38 @@ describe('Library', () => {
       // Search input should be present in LibraryFilters
       const searchInput = screen.getByPlaceholderText(/search/i)
       expect(searchInput).toBeInTheDocument()
+    })
+
+    it('shows only newly detected recordings in the review queue', async () => {
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: [
+          { ...mockRecording, id: 'new-recording', title: 'Needs Review', reviewStatus: 'new' },
+          { ...mockRecording, id: 'known-recording', title: 'Already Known', reviewStatus: 'dismissed' }
+        ],
+        loading: false,
+        error: null,
+        refresh: vi.fn(),
+        deviceConnected: true,
+        stats: {
+          total: 2,
+          deviceOnly: 0,
+          localOnly: 2,
+          both: 0,
+          synced: 2,
+          unsynced: 0,
+          onSource: 0,
+          locallyAvailable: 2,
+          reviewNew: 1
+        }
+      })
+
+      renderLibrary()
+      fireEvent.click(screen.getByRole('button', { name: /show new recordings awaiting review/i }))
+
+      await waitFor(() => {
+        expect(screen.getByText('Needs Review')).toBeInTheDocument()
+        expect(screen.queryByText('Already Known')).not.toBeInTheDocument()
+      })
     })
   })
 

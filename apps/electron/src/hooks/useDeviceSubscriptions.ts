@@ -11,6 +11,135 @@ import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useAppStore } from '@/store/useAppStore'
 import { shouldLogQa } from '@/services/qa-monitor'
 import { checkAutoSyncAllowed, waitForConfig, waitForDeviceReady } from '@/utils/autoSyncGuard'
+import { getStableDeviceId } from '@/utils/deviceIdentity'
+
+const MAX_AUTOMATIC_SYNC_FILES = 20
+
+type DeviceService = ReturnType<typeof getHiDockDeviceService>
+
+interface SafeAutoSyncResult {
+  queued: number
+  baselineInitialized: boolean
+  reason?: string
+}
+
+/**
+ * Observe the connected device and queue only recordings that are explicitly in
+ * its durable Review queue. The first observation creates a baseline and queues
+ * nothing, even when the device contains a large historical archive.
+ */
+export async function startSafeAutoSync(
+  deviceService: DeviceService,
+  setDeviceSyncState: (state: {
+    deviceSyncing: boolean
+    deviceSyncProgress: { total: number; current: number }
+    deviceFileDownloading: string | null
+  }) => void
+): Promise<SafeAutoSyncResult> {
+  const deviceId = getStableDeviceId(deviceService)
+  if (!deviceId) {
+    deviceService.log('warning', 'Auto-sync paused', 'Could not establish a stable device identity')
+    return { queued: 0, baselineInitialized: false, reason: 'device-identity-unavailable' }
+  }
+
+  if (!window.electronAPI?.deviceIngestion || !window.electronAPI?.downloadService) {
+    deviceService.log('warning', 'Auto-sync paused', 'The safe review-queue service is unavailable')
+    return { queued: 0, baselineInitialized: false, reason: 'review-service-unavailable' }
+  }
+
+  const recordings = deviceService.getCachedRecordings()
+  if (recordings.length === 0) {
+    return { queued: 0, baselineInitialized: false, reason: 'empty-device-inventory' }
+  }
+
+  const observation = await window.electronAPI.deviceIngestion.observeInventory({
+    deviceId,
+    files: recordings.map((recording) => ({
+      filename: recording.filename,
+      fileSize: recording.size ?? 0,
+      recordedAt: recording.dateCreated?.toISOString() ?? null
+    }))
+  })
+
+  if (observation.baselineInitialized) {
+    deviceService.log(
+      'info',
+      'Auto-sync baseline created',
+      `${recordings.length} existing recordings were left on the device for manual review`
+    )
+  }
+
+  const pendingFilenames = new Set(observation.pendingItems.map((item) => item.filename))
+  const pendingRecordingsWithUnknownDates = recordings.filter(
+    (recording) => pendingFilenames.has(recording.filename) && !recording.dateCreated
+  )
+  const pendingRecordings = recordings.filter(
+    (recording) => pendingFilenames.has(recording.filename) && recording.dateCreated
+  )
+  if (pendingRecordingsWithUnknownDates.length > 0) {
+    deviceService.log(
+      'warning',
+      'Auto-sync paused for undated recordings',
+      `${pendingRecordingsWithUnknownDates.length} recording${pendingRecordingsWithUnknownDates.length > 1 ? 's need' : ' needs'} an original date before download`
+    )
+  }
+  if (pendingRecordings.length === 0) {
+    return {
+      queued: 0,
+      baselineInitialized: observation.baselineInitialized,
+      reason: pendingRecordingsWithUnknownDates.length > 0 ? 'source-date-unknown' : 'no-new-review-items'
+    }
+  }
+
+  if (pendingRecordings.length > MAX_AUTOMATIC_SYNC_FILES) {
+    deviceService.log(
+      'warning',
+      'Auto-sync paused',
+      `${pendingRecordings.length} new recordings require manual selection to prevent an unexpected bulk download`
+    )
+    return { queued: 0, baselineInitialized: observation.baselineInitialized, reason: 'automatic-limit-exceeded' }
+  }
+
+  const reconcileResults = await window.electronAPI.downloadService.getFilesToSync(
+    pendingRecordings.map((recording) => ({
+      filename: recording.filename,
+      size: recording.size,
+      duration: recording.duration,
+      dateCreated: recording.dateCreated
+    }))
+  )
+  const toSync = reconcileResults.filter((result) => !result.skipReason)
+  if (toSync.length === 0) {
+    deviceService.log('success', 'Review queue synced', 'No new review recordings need downloading')
+    return { queued: 0, baselineInitialized: observation.baselineInitialized, reason: 'already-synced' }
+  }
+
+  const filesToQueue = toSync.map((recording) => ({
+    filename: recording.filename,
+    size: recording.size,
+    dateCreated: recording.dateCreated?.toISOString()
+  }))
+  await window.electronAPI.downloadService.startSession(filesToQueue)
+  await Promise.allSettled(toSync.map((recording) => (
+    window.electronAPI.deviceIngestion.updateReviewStatus({
+      deviceId,
+      filename: recording.filename,
+      status: 'approved'
+    })
+  )))
+
+  if (shouldLogQa()) {
+    console.log(`[QA-MONITOR][Operation] Safe auto-sync: ${toSync.length} reviewed files queued`)
+  }
+  deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new review recordings queued for download`)
+  setDeviceSyncState({
+    deviceSyncing: true,
+    deviceSyncProgress: { total: toSync.length, current: 0 },
+    deviceFileDownloading: toSync[0]?.filename ?? null
+  })
+
+  return { queued: toSync.length, baselineInitialized: observation.baselineInitialized }
+}
 
 export function useDeviceSubscriptions() {
   const deviceService = getHiDockDeviceService()
@@ -92,37 +221,7 @@ export function useDeviceSubscriptions() {
           autoSyncTriggeredRef.current = true
           if (shouldLogQa()) console.log('[useDeviceSubscriptions] Auto-sync triggered after 2s debounce')
 
-          const recordings = deviceService.getCachedRecordings()
-          if (recordings.length > 0) {
-            // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching
-            const reconcileResults = await window.electronAPI.downloadService.getFilesToSync(
-              recordings.map(rec => ({
-                filename: rec.filename,
-                size: rec.size,
-                duration: rec.duration,
-                dateCreated: rec.dateCreated
-              }))
-            )
-            const toSync = reconcileResults.filter(result => !result.skipReason)
-            if (toSync.length > 0) {
-              if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Auto-sync on ready: ${toSync.length} files to download`)
-              deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
-
-              const filesToQueue = toSync.map(rec => ({
-                filename: rec.filename,
-                size: rec.size,
-                dateCreated: rec.dateCreated?.toISOString()
-              }))
-              await window.electronAPI.downloadService.startSession(filesToQueue)
-              setDeviceSyncStateRef.current({
-                deviceSyncing: true,
-                deviceSyncProgress: { total: toSync.length, current: 0 },
-                deviceFileDownloading: toSync[0]?.filename ?? null
-              })
-            } else {
-              deviceService.log('success', 'All files synced', 'No new recordings to download')
-            }
-          }
+          await startSafeAutoSync(deviceService, setDeviceSyncStateRef.current)
         } catch (error) {
           console.error('[useDeviceSubscriptions] Auto-sync failed:', error)
         } finally {
@@ -201,38 +300,7 @@ export function useDeviceSubscriptions() {
       autoSyncTriggeredRef.current = true
       if (shouldLogQa()) console.log('[useDeviceSubscriptions] Initial auto-sync check (device pre-connected)')
 
-      const recordings = deviceService.getCachedRecordings()
-      if (recordings.length > 0) {
-        // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching
-        const reconcileResults = await window.electronAPI.downloadService.getFilesToSync(
-          recordings.map(rec => ({
-            filename: rec.filename,
-            size: rec.size,
-            duration: rec.duration,
-            dateCreated: rec.dateCreated
-          }))
-        )
-        const toSync = reconcileResults.filter(result => !result.skipReason)
-        if (toSync.length > 0) {
-          if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Initial auto-sync: ${toSync.length} files to download`)
-          deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
-
-          const filesToQueue = toSync.map(rec => ({
-            filename: rec.filename,
-            size: rec.size,
-            dateCreated: rec.dateCreated?.toISOString()
-          }))
-          await window.electronAPI.downloadService.startSession(filesToQueue)
-          // SM-M02: Use ref to avoid stale closure
-          setDeviceSyncStateRef.current({
-            deviceSyncing: true,
-            deviceSyncProgress: { total: toSync.length, current: 0 },
-            deviceFileDownloading: toSync[0]?.filename ?? null
-          })
-        } else {
-          deviceService.log('success', 'All files synced', 'No new recordings to download')
-        }
-      }
+      await startSafeAutoSync(deviceService, setDeviceSyncStateRef.current)
     }
     checkInitialAutoSync()
 

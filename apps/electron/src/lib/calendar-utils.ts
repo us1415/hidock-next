@@ -244,14 +244,18 @@ export function calculateMeetingColumns(
  * Get recording-meeting match score (0 = no match, higher = better match)
  */
 export function getRecordingMeetingMatchScore(recording: UnifiedRecording, meeting: Meeting): number {
+  // An explicit user link remains valid even when source chronology is unknown,
+  // but unknown dates must never participate in automatic time correlation.
+  if (recording.meetingId === meeting.id) return 1000
+  if (!recording.dateRecorded || recording.sourceDatePrecision === 'date-only' || recording.sourceDatePrecision === 'unknown') {
+    return 0
+  }
+
   const recStart = recording.dateRecorded.getTime()
   const recDurationMs = (recording.duration || 0) * 1000
   const recEnd = recStart + recDurationMs
   const meetingStart = new Date(meeting.start_time).getTime()
   const meetingEnd = new Date(meeting.end_time).getTime()
-
-  // Manual link = highest priority
-  if (recording.meetingId === meeting.id) return 1000
 
   // Calculate time overlap
   const overlapStart = Math.max(recStart, meetingStart)
@@ -323,7 +327,9 @@ export function matchRecordingsToMeetings(
 
       const recordingStartTime = matchingRecording.dateRecorded
       const recordingDurationMs = (matchingRecording.duration || 0) * 1000
-      const recordingEndTime = new Date(recordingStartTime.getTime() + recordingDurationMs)
+      const recordingEndTime = recordingStartTime
+        ? new Date(recordingStartTime.getTime() + recordingDurationMs)
+        : undefined
 
       let durationMatch: DurationMatch = 'no_recording'
       let durationDifferenceMinutes = 0
@@ -348,7 +354,7 @@ export function matchRecordingsToMeetings(
         isPlaceholder: false,
         matchedRecordingId: matchingRecording.id,
         recordingDurationSeconds: matchingRecording.duration,
-        recordingStartTime,
+        recordingStartTime: recordingStartTime ?? undefined,
         recordingEndTime: recordingDurationMs > 0 ? recordingEndTime : undefined,
         durationMatch,
         durationDifferenceMinutes,
@@ -374,12 +380,13 @@ export function matchRecordingsToMeetings(
  * Create placeholder meetings from orphan recordings
  */
 export function createPlaceholderMeetings(orphanRecordings: UnifiedRecording[]): CalendarMeeting[] {
-  return orphanRecordings.map((rec) => {
+  return orphanRecordings.flatMap((rec) => {
     const recDate = rec.dateRecorded
+    if (!recDate || rec.sourceDatePrecision === 'date-only' || rec.sourceDatePrecision === 'unknown') return []
     const durationMs = (rec.duration || 30 * 60) * 1000
     const endDate = new Date(recDate.getTime() + durationMs)
 
-    return {
+    return [{
       id: `placeholder_${rec.id}`,
       subject: rec.filename || 'Recording',
       start_time: recDate.toISOString(),
@@ -398,7 +405,7 @@ export function createPlaceholderMeetings(orphanRecordings: UnifiedRecording[]):
       isPlaceholder: true,
       matchedRecordingId: rec.id,
       recordingLocation: rec.location,
-    }
+    }]
   })
 }
 
@@ -432,6 +439,9 @@ export function buildCalendarRecordings(
 
   for (const recording of recordings) {
     const startTime = recording.dateRecorded
+    if (!startTime || recording.sourceDatePrecision === 'date-only' || recording.sourceDatePrecision === 'unknown') {
+      continue
+    }
     const durationMs = (recording.duration || 0) * 1000
     const endTime = new Date(startTime.getTime() + (durationMs || 30 * 60 * 1000))
 

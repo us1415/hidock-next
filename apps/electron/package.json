@@ -1,6 +1,6 @@
 {
   "name": "hidock-universal-knowledge-hub",
-  "version": "1.0.0",
+  "version": "2.0.0-beta",
   "description": "Universal knowledge hub that transforms ANY information source (recordings, documents, notes, emails, etc.) into actionable insights - integrating device management, transcription, and AI analysis",
   "main": "./out/main/index.js",
   "author": "HiDock",
@@ -57,6 +57,7 @@
     "tailwind-merge": "^2.5.4",
     "tailwindcss-animate": "^1.0.7",
     "uuid": "^11.0.3",
+    "yauzl": "2.10.0",
     "zod": "^4.1.13",
     "zustand": "^5.0.1"
   },
@@ -77,6 +78,7 @@
     "@types/testing-library__jest-dom": "^5.14.9",
     "@types/uuid": "^10.0.0",
     "@types/w3c-web-usb": "^1.0.13",
+    "@types/yauzl": "2.10.3",
     "@vitejs/plugin-react": "^4.3.3",
     "@vitest/coverage-v8": "^4.0.18",
     "@vitest/ui": "^4.0.16",
@@ -86,6 +88,7 @@
     "electron-vite": "^5.0.0",
     "eslint": "^9.39.2",
     "eslint-plugin-react": "^7.37.2",
+    "fflate": "0.8.2",
     "jest-axe": "^10.0.0",
     "jsdom": "^27.4.0",
     "postcss": "^8.4.49",

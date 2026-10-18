@@ -8,7 +8,7 @@ interface CachedDeviceFile {
   filename: string
   size: number
   duration: number
-  dateCreated: string
+  dateCreated: string | null
 }
 
 export function registerDeviceCacheHandlers(): void {
@@ -16,7 +16,7 @@ export function registerDeviceCacheHandlers(): void {
   ipcMain.handle('deviceCache:getAll', async () => {
     try {
       const files = queryAll<CachedDeviceFile>(
-        'SELECT * FROM device_file_cache ORDER BY dateCreated DESC'
+        'SELECT * FROM device_file_cache ORDER BY dateCreated IS NULL, dateCreated DESC'
       )
       return files
     } catch (error) {

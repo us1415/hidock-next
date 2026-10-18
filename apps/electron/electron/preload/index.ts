@@ -56,7 +56,6 @@ import type {
   RAGChatResponse,
   RAGStatus,
   GetContactsRequest,
-  GetContactsResponse,
   UpdateContactRequest,
   GetProjectsRequest,
   GetProjectsResponse,
@@ -73,8 +72,22 @@ import type {
   KnowledgeCapture, 
   Actionable, 
   Conversation, 
-  Message 
+  Message,
+  Person
 } from '../../src/types/knowledge'
+
+type DeviceReviewStatus = 'new' | 'approved' | 'dismissed'
+
+interface DeviceReviewItem {
+  id: string
+  device_id: string
+  filename: string
+  file_size: number | null
+  recorded_at: string | null
+  status: DeviceReviewStatus
+  first_seen_at: string
+  reviewed_at: string | null
+}
 
 // Type definitions for the API
 export interface ElectronAPI {
@@ -108,7 +121,7 @@ export interface ElectronAPI {
 
   // Contacts
   contacts: {
-    getAll: (request?: GetContactsRequest) => Promise<Result<GetContactsResponse>>
+    getAll: (request?: GetContactsRequest) => Promise<Result<{ contacts: Person[]; total: number }>>
     getById: (id: string) => Promise<Result<ContactWithMeetings>>
     update: (request: UpdateContactRequest) => Promise<Result<Contact>>
     delete: (id: string) => Promise<Result<void>>
@@ -156,9 +169,51 @@ export interface ElectronAPI {
     processQueue: () => Promise<boolean>
     getTranscriptionStatus: () => Promise<{ isProcessing: boolean; pendingCount: number; processingCount: number }>
     getTranscriptionQueue: () => Promise<any[]>
+    getTranscriptionHistory: (recordingId: string) => Promise<Array<{
+      id: string
+      provider: string
+      model: string
+      attempt: number
+      status: 'processing' | 'completed' | 'failed' | 'cancelled'
+      started_at: string
+      completed_at: string | null
+      elapsed_ms: number | null
+      error_message: string | null
+    }>>
     cancelTranscription: (recordingId: string) => Promise<{ success: boolean }>
     cancelAllTranscriptions: () => Promise<{ success: boolean; count: number }>
     updateQueueItem: (id: string, status: string, errorMessage?: string) => Promise<boolean>
+  }
+
+  deviceIngestion: {
+    getState: (deviceId: string) => Promise<{
+      device_id: string
+      last_seen_recorded_at: string | null
+      last_seen_filename: string | null
+      last_scan_at: string
+      last_successful_sync_at: string | null
+      last_successful_sync_recorded_at: string | null
+      updated_at: string
+    } | null>
+    observeInventory: (input: {
+      deviceId: string
+      files: Array<{ filename: string; fileSize: number; recordedAt: string | null }>
+    }) => Promise<{
+      baselineInitialized: boolean
+      newItems: DeviceReviewItem[]
+      pendingItems: DeviceReviewItem[]
+      state: Record<string, unknown>
+    }>
+    getReviewItems: (input: { deviceId: string; status?: DeviceReviewStatus }) => Promise<DeviceReviewItem[]>
+    updateReviewStatus: (input: {
+      deviceId: string
+      filename: string
+      status: DeviceReviewStatus
+    }) => Promise<DeviceReviewItem | null>
+    markSyncSuccess: (input: {
+      deviceId: string
+      latestSyncedRecordedAt: string | null
+    }) => Promise<Record<string, unknown> | null>
   }
 
   // Database - Transcripts
@@ -166,6 +221,21 @@ export interface ElectronAPI {
     getByRecordingId: (recordingId: string) => Promise<any>
     getByRecordingIds: (recordingIds: string[]) => Promise<Record<string, any>>
     search: (query: string) => Promise<any[]>
+    export: (recordingId: string, format: 'markdown' | 'text' | 'pdf') => Promise<{
+      success: boolean
+      canceled?: boolean
+      filePath?: string
+      error?: string
+    }>
+    exportBatch: (recordingIds: string[], format: 'markdown' | 'text' | 'pdf') => Promise<{
+      success: boolean
+      canceled?: boolean
+      directoryPath?: string
+      manifestPath?: string
+      exported?: number
+      skipped?: number
+      error?: string
+    }>
   }
 
   // Database - Queue
@@ -220,10 +290,144 @@ export interface ElectronAPI {
     getSettings: () => Promise<any>
   }
 
+  // Imports
+  imports: {
+    previewOtterReconciliation: () => Promise<{
+      success: boolean
+      error?: string
+      preview?: {
+        generatedAt: string
+        deviceInventoryStart: string | null
+        deviceInventoryEnd: string | null
+        counts: {
+          deviceRecordings: number
+          importedOtter: number
+          importedMissingTranscript: number
+          importedMissingTranscriptUsableAudio: number
+          importedMissingTranscriptUnusableAudio: number
+          preDeviceOtterOnly: number
+          overlappingOtter: number
+          exactTimestampMatches: number
+          dateDurationMatches: number
+          adjacentDateDurationMatches: number
+          provisionalMatches: number
+          unresolvedOverlapping: number
+          deviceWithoutOtterMatch: number
+        }
+        matches: Array<{
+          importedRecordingId: string
+          importedFilename: string
+          deviceFilename: string
+          deviceRecordedAt: string
+          method: 'exact-timestamp' | 'date-duration' | 'adjacent-date-duration'
+          confidence: number
+          durationDifferenceSeconds?: number
+        }>
+        unresolved: Array<{
+          importedRecordingId: string
+          importedFilename: string
+          recordedDate: string
+          durationSeconds: number | null
+          nearestCandidates: Array<{
+            deviceFilename: string
+            deviceRecordedAt: string
+            durationDifferenceSeconds: number | null
+          }>
+        }>
+      }
+    }>
+    previewOtter: () => Promise<{
+      success: boolean
+      canceled?: boolean
+      error?: string
+      preview?: {
+        archivePath: string
+        archiveFilename: string
+        archiveBytes: number
+        scannedAt: string
+        counts: {
+          total: number
+          ready: number
+          dateReview: number
+          missingTranscript: number
+          duplicate: number
+          audioFiles: number
+          transcriptFiles: number
+          summaryFiles: number
+          uniqueSpeakers: number
+        }
+        speakers: string[]
+        items: Array<{
+          key: string
+          title: string
+          audioFilename: string
+          audioBytes: number
+          recordedAt: string | null
+          recordedDate: string | null
+          sourceDatePrecision: 'exact' | 'date-only' | 'unknown'
+          dateEvidence: 'filename-timestamp' | 'filename-date' | 'summary-date' | 'unknown'
+          transcriptAvailable: boolean
+          summaryAvailable: boolean
+          speakers: string[]
+          status: 'ready' | 'date-review' | 'missing-transcript' | 'duplicate'
+          duplicateRecordingId?: string
+          duplicateReason?: 'filename' | 'audio-metadata' | 'transcript' | 'archive-transcript'
+        }>
+      }
+    }>
+    commitOtter: (archivePath: string, selectedKeys: string[]) => Promise<{
+      success: boolean
+      error?: string
+      safetyBackupPath?: string
+      result?: {
+        imported: number
+        withTranscripts: number
+        audioOnly: number
+        importedRecordingIds: string[]
+      }
+    }>
+  }
+
   // Storage
   storage: {
     getInfo: () => Promise<any>
     openFolder: (folder: 'recordings' | 'transcripts' | 'data') => Promise<boolean>
+    createBackup: () => Promise<{
+      success: boolean
+      canceled?: boolean
+      backupPath?: string
+      fileCount?: number
+      totalBytes?: number
+      error?: string
+    }>
+    validateBackup: () => Promise<{
+      success: boolean
+      canceled?: boolean
+      validation?: {
+        valid: boolean
+        errors: string[]
+        warnings: string[]
+        fileCount: number
+        totalBytes: number
+        createdAt?: string
+      }
+      error?: string
+    }>
+    restoreBackup: () => Promise<{
+      success: boolean
+      canceled?: boolean
+      restarting?: boolean
+      safetyBackupPath?: string
+      error?: string
+      validation?: {
+        valid: boolean
+        errors: string[]
+        warnings: string[]
+        fileCount: number
+        totalBytes: number
+        createdAt?: string
+      }
+    }>
     readRecording: (filePath: string) => Promise<{ success: boolean; data?: string; error?: string }>
     deleteRecording: (filePath: string) => Promise<boolean>
     saveRecording: (filename: string, data: number[], recordingDateIso?: string) => Promise<string>
@@ -326,6 +530,7 @@ export interface ElectronAPI {
         progress: number
         status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
         error?: string
+        recordingDate?: Date | string
       }>
       session: {
         id: string
@@ -338,9 +543,9 @@ export interface ElectronAPI {
       isPaused: boolean
     }>
     isFileSynced: (filename: string) => Promise<{ synced: boolean; reason: string }>
-    getFilesToSync: (files: Array<{ filename: string; size: number; duration: number; dateCreated: Date }>) => Promise<Array<{ filename: string; size: number; duration: number; dateCreated: Date; skipReason?: string }>>
-    queueDownloads: (files: Array<{ filename: string; size: number; dateCreated?: string }>) => Promise<string[]>
-    startSession: (files: Array<{ filename: string; size: number; dateCreated?: string }>) => Promise<{
+    getFilesToSync: (files: Array<{ filename: string; size: number; duration: number; dateCreated: Date | null }>) => Promise<Array<{ filename: string; size: number; duration: number; dateCreated: Date | null; skipReason?: string }>>
+    queueDownloads: (files: Array<{ filename: string; size: number; dateCreated?: string | null }>) => Promise<string[]>
+    startSession: (files: Array<{ filename: string; size: number; dateCreated?: string | null }>) => Promise<{
       id: string
       totalFiles: number
       completedFiles: number
@@ -357,6 +562,7 @@ export interface ElectronAPI {
     getStats: () => Promise<{ totalSynced: number; pendingInQueue: number; failedInQueue: number }>
     checkStalled: () => Promise<number>
     cancelActive: (reason?: string) => Promise<number>
+    notifyCompletion: (stats: { completed: number; failed: number; aborted: boolean }) => Promise<void>
     onStateUpdate: (callback: (state: any) => void) => () => void
   }
 
@@ -451,7 +657,11 @@ export interface ElectronAPI {
   // Transcription Events
   onTranscriptionStarted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => () => void
   onTranscriptionProgress: (callback: (data: { queueItemId: string; progress: number; stage: string }) => void) => () => void
-  onTranscriptionCompleted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => () => void
+  onTranscriptionCompleted: (callback: (data: {
+    queueItemId?: string
+    recordingId: string
+    provider?: 'gemini' | 'openai'
+  }) => void) => () => void
   onTranscriptionFailed: (callback: (data: { queueItemId?: string; recordingId: string; error: string }) => void) => () => void
   onTranscriptionCancelled: (callback: (data: { recordingId: string }) => void) => () => void
   onTranscriptionAllCancelled: (callback: (data: { count: number }) => void) => () => void
@@ -468,6 +678,14 @@ const electronAPI: ElectronAPI = {
   app: {
     restart: () => callIPC('app:restart'),
     info: () => callIPC('app:info')
+  },
+
+  deviceIngestion: {
+    getState: (deviceId) => callIPC('deviceIngestion:getState', deviceId),
+    observeInventory: (input) => callIPC('deviceIngestion:observeInventory', input),
+    getReviewItems: (input) => callIPC('deviceIngestion:getReviewItems', input),
+    updateReviewStatus: (input) => callIPC('deviceIngestion:updateReviewStatus', input),
+    markSyncSuccess: (input) => callIPC('deviceIngestion:markSyncSuccess', input)
   },
 
   config: {
@@ -528,6 +746,7 @@ const electronAPI: ElectronAPI = {
     processQueue: () => callIPC('recordings:processQueue'),
     getTranscriptionStatus: () => callIPC('recordings:getTranscriptionStatus'),
     getTranscriptionQueue: () => callIPC('transcription:getQueue'),
+    getTranscriptionHistory: (recordingId: string) => callIPC('recordings:getTranscriptionHistory', recordingId),
     cancelTranscription: (recordingId: string) => callIPC('transcription:cancel', recordingId),
     cancelAllTranscriptions: () => callIPC('transcription:cancelAll'),
     updateQueueItem: (id: string, status: string, errorMessage?: string) => callIPC('transcription:updateQueueItem', id, status, errorMessage),
@@ -536,7 +755,9 @@ const electronAPI: ElectronAPI = {
   transcripts: {
     getByRecordingId: (recordingId) => callIPC('db:get-transcript', recordingId),
     getByRecordingIds: (recordingIds) => callIPC('db:get-transcripts-by-recording-ids', recordingIds),
-    search: (query) => callIPC('db:search-transcripts', query)
+    search: (query) => callIPC('db:search-transcripts', query),
+    export: (recordingId, format) => callIPC('transcripts:export', recordingId, format),
+    exportBatch: (recordingIds, format) => callIPC('transcripts:exportBatch', recordingIds, format)
   },
 
   queue: {
@@ -585,9 +806,18 @@ const electronAPI: ElectronAPI = {
     getSettings: () => callIPC('calendar:get-settings')
   },
 
+  imports: {
+    previewOtterReconciliation: () => callIPC('imports:preview-otter-reconciliation'),
+    previewOtter: () => callIPC('imports:preview-otter'),
+    commitOtter: (archivePath, selectedKeys) => callIPC('imports:commit-otter', archivePath, selectedKeys)
+  },
+
   storage: {
     getInfo: () => callIPC('storage:get-info'),
     openFolder: (folder) => callIPC('storage:open-folder', folder),
+    createBackup: () => callIPC('storage:create-backup'),
+    validateBackup: () => callIPC('storage:validate-backup'),
+    restoreBackup: () => callIPC('storage:restore-backup'),
     readRecording: (filePath) => callIPC('storage:read-recording', filePath),
     deleteRecording: (filePath) => callIPC('storage:delete-recording', filePath),
     saveRecording: (filename, data, recordingDateIso) => callIPC('storage:save-recording', filename, data, recordingDateIso)
@@ -757,7 +987,11 @@ const electronAPI: ElectronAPI = {
     }
   },
 
-  onTranscriptionCompleted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => {
+  onTranscriptionCompleted: (callback: (data: {
+    queueItemId?: string
+    recordingId: string
+    provider?: 'gemini' | 'openai'
+  }) => void) => {
     const handler = (_event: any, data: { queueItemId?: string; recordingId: string }) => callback(data)
     ipcRenderer.on('transcription:completed', handler)
     return () => {
