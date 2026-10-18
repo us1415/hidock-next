@@ -5,7 +5,8 @@ import {
   analyzeTranscriptWithOpenAI,
   mergeTranscriptChunks,
   OPENAI_AUDIO_FILE_LIMIT_BYTES,
-  transcribeAudioWithOpenAI
+  transcribeAudioWithOpenAI,
+  transcribeAudioWithOpenAIDiarization
 } from '../openai-transcription'
 
 afterEach(() => {
@@ -107,6 +108,37 @@ describe('OpenAI transcription provider', () => {
     })).rejects.toThrow('files up to 25 MB')
 
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('requests diarized segments with a bounded known-speaker reference', async () => {
+    const response = {
+      text: 'Joel K: Hello.',
+      duration: 2.5,
+      segments: [{
+        type: 'transcript.text.segment', id: 'seg-1', start: 0, end: 2.5, text: 'Hello.', speaker: 'Joel K'
+      }]
+    }
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(transcribeAudioWithOpenAIDiarization({
+      apiKey: 'sk-test-key',
+      audio: Buffer.from('audio'),
+      filePath: 'meeting.mp3',
+      mimeType: 'audio/mp3',
+      knownSpeakers: [{ name: 'Joel K', dataUrl: 'data:audio/wav;base64,AAAA' }]
+    })).resolves.toEqual(response)
+
+    const request = fetchMock.mock.calls[0][1] as RequestInit
+    const form = request.body as FormData
+    expect(form.get('model')).toBe('gpt-4o-transcribe-diarize')
+    expect(form.get('response_format')).toBe('diarized_json')
+    expect(form.get('chunking_strategy')).toBe('auto')
+    expect(form.getAll('known_speaker_names[]')).toEqual(['Joel K'])
+    expect(form.getAll('known_speaker_references[]')).toEqual(['data:audio/wav;base64,AAAA'])
   })
 
   it('parses structured transcript analysis from the Responses API', async () => {

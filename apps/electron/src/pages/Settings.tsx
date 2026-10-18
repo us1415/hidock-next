@@ -930,10 +930,18 @@ export function Settings() {
                       <option value="gpt-transcribe">GPT Transcribe (Recommended)</option>
                       <option value="gpt-4o-mini-transcribe">GPT-4o Mini Transcribe (Lowest cost)</option>
                       <option value="gpt-4o-transcribe">GPT-4o Transcribe</option>
+                      <option value="gpt-4o-transcribe-diarize">GPT-4o Transcribe Diarize (Speaker recognition)</option>
                     </select>
                     <p className="text-xs text-muted-foreground mt-1">
-                      Large recordings are split into temporary chunks automatically and saved as one transcript.
+                      {openaiTranscriptionModel === 'gpt-4o-transcribe-diarize'
+                        ? 'Returns timestamped speaker turns and can recognize up to four known voices from local historical reference clips.'
+                        : 'Large recordings are split into temporary chunks automatically and saved as one transcript.'}
                     </p>
+                    {openaiTranscriptionModel === 'gpt-4o-transcribe-diarize' && (
+                      <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                        Speaker recognition sends short reference clips with the recording to OpenAI. Automatic transcription remains off unless enabled separately.
+                      </p>
+                    )}
                     {getOpenAITranscriptionPricingSummary(openaiTranscriptionModel) && (
                       <p className="text-xs text-muted-foreground mt-1">
                         Estimated audio cost: {getOpenAITranscriptionPricingSummary(openaiTranscriptionModel)}.

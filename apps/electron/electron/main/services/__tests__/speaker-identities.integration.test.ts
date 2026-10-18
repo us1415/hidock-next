@@ -18,10 +18,13 @@ import * as database from '../database'
 import {
   assignSpeakerAlias,
   confirmAllSpeakerIdentities,
+  getConfirmedSpeakerNameHints,
   mergeSpeakerIdentities,
   rebuildSpeakerIndex,
-  renameSpeakerIdentity
+  renameSpeakerIdentity,
+  setSelfSpeakerIdentity
 } from '../speaker-identities'
+import { extractSpeakerReferenceCandidates, selectKnownSpeakerIdentityIds } from '../speaker-references'
 
 describe('speaker identity evidence index', () => {
   beforeAll(async () => {
@@ -73,13 +76,22 @@ describe('speaker identity evidence index', () => {
 
     overview = confirmAllSpeakerIdentities('2026-10-18T12:00:30.000Z')
     expect(overview.counts).toMatchObject({ confirmed: 2, needsReview: 0 })
+    expect(getConfirmedSpeakerNameHints()).toEqual(['Joel K', 'Joey A'])
 
     const joel = overview.identities.find((identity) => identity.displayName === 'Joel K')!
+    expect(setSelfSpeakerIdentity(joel.id, '2026-10-18T12:00:45.000Z')).toMatchObject({ isSelf: true })
+    expect(extractSpeakerReferenceCandidates('Joel K  00:00\nHello\nSpeaker 1  00:10\nHi', 'Joel K'))
+      .toEqual([{ startSeconds: 0.25, endSeconds: 8.25, durationSeconds: 8 }])
+    expect(selectKnownSpeakerIdentityIds([{ organizer_name: 'Joey A' }])).toEqual([
+      joel.id,
+      overview.identities.find((identity) => identity.displayName === 'Joey A')!.id
+    ])
     renameSpeakerIdentity(joel.id, 'Joel Khan', '2026-10-18T12:01:00.000Z')
     overview = rebuildSpeakerIndex('2026-10-18T12:02:00.000Z')
     expect(overview.identities.find((identity) => identity.id === joel.id)).toMatchObject({
       displayName: 'Joel Khan',
-      status: 'confirmed'
+      status: 'confirmed',
+      isSelf: true
     })
 
     const unresolved = overview.unresolvedAliases[0]

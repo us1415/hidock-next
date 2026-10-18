@@ -31,8 +31,15 @@ import {
 } from './database'
 import { BrowserWindow } from 'electron'
 import { getVectorStore } from './vector-store'
-import { analyzeTranscriptWithOpenAI, transcribeAudioFileWithOpenAI } from './openai-transcription'
+import {
+  analyzeTranscriptWithOpenAI,
+  OpenAIDiarizedSegment,
+  transcribeAudioFileWithOpenAI,
+  transcribeAudioFileWithOpenAIDiarization
+} from './openai-transcription'
 import { chooseAutomaticMeetingLink } from './meeting-correlation'
+import { getConfirmedSpeakerNameHints, rebuildSpeakerIndex } from './speaker-identities'
+import { createKnownSpeakerReferences, selectKnownSpeakerIdentityIds } from './speaker-references'
 
 let mainWindow: BrowserWindow | null = null
 let isProcessing = false
@@ -51,6 +58,31 @@ export function buildTranscriptIndexMetadata(
     timestamp: recording.date_recorded,
     subject
   }
+}
+
+export function buildKnownSpeakerNameContext(names: string[], limit = 40): string {
+  const safeNames = [...new Set(names
+    .map((name) => name.normalize('NFKC').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100))
+    .filter(Boolean))]
+    .slice(0, Math.max(1, Math.min(limit, 100)))
+  if (safeNames.length === 0) return ''
+  return `\n\nKNOWN SPEAKER NAME SPELLINGS (vocabulary hints only; do not infer attendance or identity):\n${JSON.stringify(safeNames)}`
+}
+
+function segmentTimestamp(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(whole / 3600)
+  const minutes = Math.floor((whole % 3600) / 60)
+  const remainder = whole % 60
+  const base = `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
+  return hours > 0 ? `${String(hours).padStart(2, '0')}:${base}` : base
+}
+
+export function formatDiarizedTranscript(segments: OpenAIDiarizedSegment[]): string {
+  return segments
+    .filter((segment) => segment.text?.trim() && segment.speaker?.trim())
+    .map((segment) => `${segment.speaker.trim()}  ${segmentTimestamp(segment.start)}\n${segment.text.trim()}`)
+    .join('\n\n')
 }
 
 export function setMainWindowForTranscription(win: BrowserWindow): void {
@@ -490,6 +522,13 @@ async function transcribeRecording(
   const candidateMeetings = findCandidateMeetingsForRecording(recordingId)
   console.log(`Found ${candidateMeetings.length} candidate meetings for recording ${recordingId}`)
 
+  let knownSpeakerContext = ''
+  try {
+    knownSpeakerContext = buildKnownSpeakerNameContext(getConfirmedSpeakerNameHints())
+  } catch (error) {
+    console.warn('Could not load confirmed speaker-name hints:', error)
+  }
+
   // Build meeting context for better transcription
   let meetingContext = ''
   if (candidateMeetings.length > 0) {
@@ -511,21 +550,43 @@ The audio may be in Spanish or English - transcribe in the original language.
 Provide a clean, accurate transcription of all speech.
 If there are multiple speakers, try to indicate speaker changes with "Speaker 1:", "Speaker 2:", etc.
 ${meetingContext}
+${knownSpeakerContext}
 Return ONLY the transcription, no additional commentary.`
 
-  const fullText = provider === 'openai'
-    ? await transcribeAudioFileWithOpenAI({
+  const openAIModel = config.transcription.openaiTranscriptionModel || 'gpt-transcribe'
+  let detectedSpeakers: string[] = []
+  let fullText: string
+  if (provider === 'openai' && openAIModel === 'gpt-4o-transcribe-diarize') {
+    let knownSpeakers: Awaited<ReturnType<typeof createKnownSpeakerReferences>> = []
+    try {
+      progressCallback?.('preparing_speaker_references', 15)
+      knownSpeakers = await createKnownSpeakerReferences(selectKnownSpeakerIdentityIds(candidateMeetings))
+    } catch (error) {
+      console.warn('Could not prepare known-speaker references; continuing with anonymous diarization:', error)
+    }
+    const diarized = await transcribeAudioFileWithOpenAIDiarization({
+      apiKey,
+      filePath: recording.file_path,
+      mimeType,
+      knownSpeakers,
+      signal
+    })
+    fullText = formatDiarizedTranscript(diarized.segments)
+    detectedSpeakers = [...new Set(diarized.segments.map((segment) => segment.speaker.trim()).filter(Boolean))]
+  } else if (provider === 'openai') {
+    fullText = await transcribeAudioFileWithOpenAI({
         apiKey,
         filePath: recording.file_path,
         mimeType,
-        model: config.transcription.openaiTranscriptionModel || 'gpt-transcribe',
-        prompt: `Transcribe in the original language. Preserve names and technical terms.${meetingContext}`,
+        model: openAIModel,
+        prompt: `Transcribe in the original language. Preserve names and technical terms.${meetingContext}${knownSpeakerContext}`,
         signal,
         onProgress: (completed, total) => {
           progressCallback?.('transcribing', 20 + Math.round((completed / total) * 28))
         }
       })
-    : (await geminiModel!.generateContent([
+  } else {
+    fullText = (await geminiModel!.generateContent([
         {
           inlineData: {
             mimeType,
@@ -534,6 +595,7 @@ Return ONLY the transcription, no additional commentary.`
         },
         { text: transcriptionPrompt }
       ])).response.text()
+  }
 
   signal?.throwIfAborted()
   progressCallback?.('analyzing', 50) // spec-014: progress reporting
@@ -573,6 +635,7 @@ ${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).j
    - Avoid generic questions (e.g., "What was discussed?" or "Tell me more")
    - Questions should help users quickly understand key decisions, action items, and outcomes
 ${meetingSelectionSection}
+${knownSpeakerContext}
 
 Transcript:
 ${fullText}
@@ -681,7 +744,7 @@ Respond in JSON format:
     topics: analysis.topics ? JSON.stringify(analysis.topics) : undefined,
     key_points: analysis.key_points ? JSON.stringify(analysis.key_points) : undefined,
     sentiment: undefined,
-    speakers: undefined,
+    speakers: detectedSpeakers.length > 0 ? JSON.stringify(detectedSpeakers) : undefined,
     word_count: wordCount,
     transcription_provider: provider,
     transcription_model: provider === 'openai'
@@ -692,6 +755,13 @@ Respond in JSON format:
   }
 
   insertTranscript(transcript)
+  if (detectedSpeakers.length > 0) {
+    try {
+      rebuildSpeakerIndex()
+    } catch (error) {
+      console.warn('Transcript completed, but the speaker evidence index could not be refreshed:', error)
+    }
+  }
   // AI-13: Use standard enum value 'complete' (not 'transcribed')
   updateRecordingTranscriptionStatus(recordingId, 'complete')
 

@@ -29,6 +29,26 @@ export interface OpenAITranscriptAnalysis {
   selection_reason: string
 }
 
+export interface OpenAIDiarizedSegment {
+  id: string
+  start: number
+  end: number
+  text: string
+  speaker: string
+  type: 'transcript.text.segment'
+}
+
+export interface OpenAIDiarizedTranscript {
+  text: string
+  duration: number
+  segments: OpenAIDiarizedSegment[]
+}
+
+export interface OpenAIKnownSpeakerReference {
+  name: string
+  dataUrl: string
+}
+
 async function getOpenAIError(response: Response): Promise<string> {
   try {
     const body = await response.json() as OpenAIErrorResponse
@@ -192,6 +212,82 @@ export async function transcribeAudioWithOpenAI(options: {
     throw new Error('OpenAI transcription returned no text')
   }
   return result.text.trim()
+}
+
+export async function transcribeAudioWithOpenAIDiarization(options: {
+  apiKey: string
+  audio: Buffer
+  filePath: string
+  mimeType: string
+  knownSpeakers?: OpenAIKnownSpeakerReference[]
+  signal?: AbortSignal
+}): Promise<OpenAIDiarizedTranscript> {
+  if (options.audio.byteLength > OPENAI_AUDIO_FILE_LIMIT_BYTES) {
+    throw new Error('The prepared diarization audio exceeds OpenAI\'s 25 MB upload limit')
+  }
+  const upload = detectAudioUpload(options.audio, options.filePath, options.mimeType)
+  const form = new FormData()
+  form.append('model', 'gpt-4o-transcribe-diarize')
+  form.append('response_format', 'diarized_json')
+  form.append('chunking_strategy', 'auto')
+  form.append('file', new Blob([new Uint8Array(options.audio)], { type: upload.mimeType }), upload.filename)
+  for (const speaker of (options.knownSpeakers || []).slice(0, 4)) {
+    form.append('known_speaker_names[]', speaker.name)
+    form.append('known_speaker_references[]', speaker.dataUrl)
+  }
+
+  const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${options.apiKey}` },
+    body: form,
+    signal: options.signal
+  })
+  if (!response.ok) throw new Error(`OpenAI diarization failed: ${await getOpenAIError(response)}`)
+  const result = await response.json() as OpenAIDiarizedTranscript
+  if (!result.text?.trim() || !Array.isArray(result.segments)) {
+    throw new Error('OpenAI diarization returned no speaker segments')
+  }
+  return result
+}
+
+/** Compresses large source audio as one timeline so speaker labels remain stable across the recording. */
+export async function transcribeAudioFileWithOpenAIDiarization(options: {
+  apiKey: string
+  filePath: string
+  mimeType: string
+  knownSpeakers?: OpenAIKnownSpeakerReference[]
+  signal?: AbortSignal
+}): Promise<OpenAIDiarizedTranscript> {
+  const fileInfo = await stat(options.filePath)
+  if (fileInfo.size <= OPENAI_AUDIO_FILE_LIMIT_BYTES) {
+    return transcribeAudioWithOpenAIDiarization({ ...options, audio: await readFile(options.filePath) })
+  }
+
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), 'hidock-openai-diarize-'))
+  const compressedPath = join(temporaryDirectory, 'recording.mp3')
+  try {
+    await execFileAsync(ffmpegExecutable(), [
+      '-hide_banner', '-loglevel', 'error', '-i', options.filePath,
+      '-vn', '-ac', '1', '-ar', '16000', '-b:a', '32k', '-y', compressedPath
+    ])
+    const audio = await readFile(compressedPath)
+    if (audio.byteLength > OPENAI_AUDIO_FILE_LIMIT_BYTES) {
+      throw new Error('This recording is too long for one stable speaker-recognition request after compression')
+    }
+    return transcribeAudioWithOpenAIDiarization({
+      ...options,
+      audio,
+      filePath: compressedPath,
+      mimeType: 'audio/mp3'
+    })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error('FFmpeg is required to prepare recordings larger than 25 MB for speaker recognition')
+    }
+    throw error
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true })
+  }
 }
 
 /**

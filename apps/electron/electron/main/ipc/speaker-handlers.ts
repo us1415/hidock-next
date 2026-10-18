@@ -7,9 +7,11 @@ import {
   mergeSpeakerIdentities,
   rebuildSpeakerIndex,
   renameSpeakerIdentity,
+  setSelfSpeakerIdentity,
   SpeakerIdentity,
   SpeakerOverview
 } from '../services/speaker-identities'
+import { createKnownSpeakerReferences } from '../services/speaker-references'
 
 interface IdentityNameRequest { identityId: string; displayName: string }
 interface IdentityMergeRequest { sourceId: string; targetId: string }
@@ -45,6 +47,31 @@ export function registerSpeakerHandlers(): void {
       return success(confirmAllSpeakerIdentities())
     } catch (cause) {
       return failure('Failed to confirm speaker identities', cause)
+    }
+  })
+
+  ipcMain.handle('speakers:setSelf', async (_, identityId: unknown): Promise<Result<SpeakerIdentity>> => {
+    if (!validId(identityId)) return error('VALIDATION_ERROR', 'A valid speaker identity is required')
+    try {
+      return success(setSelfSpeakerIdentity(identityId))
+    } catch (cause) {
+      return failure(cause instanceof Error ? cause.message : 'Failed to set your speaker identity', cause)
+    }
+  })
+
+  ipcMain.handle('speakers:prepareReference', async (_, identityId: unknown): Promise<Result<{
+    available: boolean
+    name?: string
+    audioBytes?: number
+  }>> => {
+    if (!validId(identityId)) return error('VALIDATION_ERROR', 'A valid speaker identity is required')
+    try {
+      const reference = (await createKnownSpeakerReferences([identityId]))[0]
+      if (!reference) return success({ available: false })
+      const encoded = reference.dataUrl.slice(reference.dataUrl.indexOf(',') + 1)
+      return success({ available: true, name: reference.name, audioBytes: Buffer.from(encoded, 'base64').byteLength })
+    } catch (cause) {
+      return failure(cause instanceof Error ? cause.message : 'Failed to prepare a speaker reference', cause)
     }
   })
 

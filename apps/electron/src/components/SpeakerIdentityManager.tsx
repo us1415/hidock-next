@@ -33,6 +33,7 @@ export function SpeakerIdentityManager() {
   const [mergeTargets, setMergeTargets] = useState<Record<string, string>>({})
   const [mergeRequest, setMergeRequest] = useState<MergeRequest | null>(null)
   const [confirmAllOpen, setConfirmAllOpen] = useState(false)
+  const [referenceStatus, setReferenceStatus] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -83,6 +84,35 @@ export function SpeakerIdentityManager() {
       toast.success('Named speakers confirmed', `${result.data.counts.confirmed} identities are now confirmed`)
     }
     setConfirmAllOpen(false)
+  }
+
+  const setSelfIdentity = async (identityId: string) => {
+    if (!identityId) return
+    const result = await window.electronAPI.speakers.setSelf(identityId)
+    if (!result.success) {
+      toast.error('Identity not saved', errorMessage(result, 'Unable to save your speaker identity'))
+      return
+    }
+    toast.success('Your voice identity is set', result.data.displayName)
+    setReferenceStatus(null)
+    await load()
+  }
+
+  const verifySelfReference = async () => {
+    const identity = overview?.identities.find((item) => item.isSelf)
+    if (!identity) return
+    setReferenceStatus('Preparing a temporary sample…')
+    const result = await window.electronAPI.speakers.prepareReference(identity.id)
+    if (!result.success) {
+      setReferenceStatus('Reference preparation failed')
+      toast.error('Voice reference unavailable', errorMessage(result, 'Unable to prepare reference audio'))
+      return
+    }
+    const status = result.data.available
+      ? `Ready: ${result.data.name} has a usable temporary voice sample.`
+      : 'No clean 2–10 second historical sample was found.'
+    setReferenceStatus(status)
+    if (result.data.available) toast.success('Voice reference ready', result.data.name)
   }
 
   const saveName = async (identity: SpeakerIdentity) => {
@@ -158,6 +188,34 @@ export function SpeakerIdentityManager() {
             </div>
           )}
 
+          {!!overview?.identities.length && (
+            <div className="mb-4 max-w-2xl">
+              <div className="flex flex-wrap items-center gap-3">
+                <label htmlFor="self-speaker-identity" className="whitespace-nowrap text-sm font-medium">Your identity</label>
+                <select
+                  id="self-speaker-identity"
+                  className="h-9 min-w-52 flex-1 rounded-md border border-input bg-background px-3 text-sm"
+                  value={overview.identities.find((identity) => identity.isSelf)?.id || ''}
+                  onChange={(event) => setSelfIdentity(event.target.value)}
+                >
+                  <option value="">Select your speaker label…</option>
+                  {overview.identities.map((identity) => (
+                    <option key={identity.id} value={identity.id}>{identity.displayName}</option>
+                  ))}
+                </select>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!overview.identities.some((identity) => identity.isSelf) || referenceStatus === 'Preparing a temporary sample…'}
+                  onClick={verifySelfReference}
+                >
+                  Verify voice sample
+                </Button>
+              </div>
+              {referenceStatus && <p className="mt-1 text-xs text-muted-foreground">{referenceStatus}</p>}
+            </div>
+          )}
+
           <Input
             className="mb-4 max-w-sm"
             placeholder="Find a speaker or original label..."
@@ -212,6 +270,7 @@ export function SpeakerIdentityManager() {
                     <span className={identity.status === 'confirmed' ? 'text-emerald-600' : 'text-amber-600'}>
                       {identity.status === 'confirmed' ? 'Confirmed' : 'Needs review'}
                     </span>
+                    {identity.isSelf && <span className="rounded bg-primary/10 px-2 py-0.5 font-medium text-primary">You</span>}
                     <span className="text-muted-foreground">• {identity.occurrenceCount} transcripts •</span>
                     {identity.aliases.map((alias) => (
                       <span key={alias.id} className="rounded bg-muted px-2 py-0.5" title="Original transcript label">

@@ -16,6 +16,7 @@ export interface SpeakerIdentity {
   displayName: string
   status: 'needs-review' | 'confirmed'
   contactId: string | null
+  isSelf: boolean
   firstSeenAt: string | null
   lastSeenAt: string | null
   occurrenceCount: number
@@ -49,6 +50,7 @@ interface IdentityRow {
   canonical_key: string
   display_name: string
   contact_id: string | null
+  is_self: number
   status: 'needs-review' | 'confirmed'
   first_seen_at: string | null
   last_seen_at: string | null
@@ -64,7 +66,7 @@ interface AliasRow {
   last_seen_at: string | null
 }
 
-const GENERIC_SPEAKER = /^(?:unknown(?: speaker)?|speaker\s*\d+|speaker|multiple speakers?|unidentified|participant\s*\d+)$/i
+const GENERIC_SPEAKER = /^(?:[a-z]|unknown(?: speaker)?|speaker\s*\d+|speaker|multiple speakers?|unidentified|participant\s*\d+)$/i
 const SPEAKER_HEADER = /^(.+?)\s{2,}(?:(?:\d{1,2}):)?\d{2}:\d{2}$/
 
 export function normalizeSpeakerLabel(value: string): { displayName: string; canonicalKey: string; generic: boolean } {
@@ -190,6 +192,7 @@ export function getSpeakerOverview(): SpeakerOverview {
       displayName: identity.display_name,
       status: identity.status,
       contactId: identity.contact_id,
+      isSelf: identity.is_self === 1,
       firstSeenAt: identity.first_seen_at,
       lastSeenAt: identity.last_seen_at,
       occurrenceCount: identityAliases.reduce((total, alias) => total + alias.occurrenceCount, 0),
@@ -212,6 +215,19 @@ export function getSpeakerOverview(): SpeakerOverview {
       speakerSegments: occurrenceTotals.segments
     }
   }
+}
+
+export function getConfirmedSpeakerNameHints(limit = 40): string[] {
+  const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 40, 100))
+  return queryAll<{ display_name: string }>(`
+    SELECT i.display_name
+    FROM speaker_identities i
+    LEFT JOIN speaker_aliases a ON a.identity_id = i.id
+    WHERE i.status = 'confirmed'
+    GROUP BY i.id, i.display_name
+    ORDER BY COALESCE(SUM(a.occurrence_count), 0) DESC, i.display_name COLLATE NOCASE
+    LIMIT ?
+  `, [safeLimit]).map((row) => row.display_name)
 }
 
 export function renameSpeakerIdentity(identityId: string, displayName: string, now = new Date().toISOString()): SpeakerIdentity {
@@ -238,6 +254,20 @@ export function confirmAllSpeakerIdentities(now = new Date().toISOString()): Spe
     )
   })
   return getSpeakerOverview()
+}
+
+export function setSelfSpeakerIdentity(identityId: string, now = new Date().toISOString()): SpeakerIdentity {
+  const identity = queryOne<IdentityRow>('SELECT * FROM speaker_identities WHERE id = ?', [identityId])
+  if (!identity) throw new Error('Speaker identity not found.')
+  runInTransaction(() => {
+    const database = getDatabase()
+    database.run('UPDATE speaker_identities SET is_self = 0, updated_at = ? WHERE is_self = 1', [now])
+    database.run(
+      "UPDATE speaker_identities SET is_self = 1, status = 'confirmed', updated_at = ? WHERE id = ?",
+      [now, identityId]
+    )
+  })
+  return getSpeakerOverview().identities.find((item) => item.id === identityId)!
 }
 
 export function mergeSpeakerIdentities(sourceId: string, targetId: string, now = new Date().toISOString()): SpeakerIdentity {

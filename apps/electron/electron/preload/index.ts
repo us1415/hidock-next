@@ -104,6 +104,7 @@ export interface SpeakerIdentity {
   displayName: string
   status: 'needs-review' | 'confirmed'
   contactId: string | null
+  isSelf: boolean
   firstSeenAt: string | null
   lastSeenAt: string | null
   occurrenceCount: number
@@ -167,6 +168,8 @@ export interface ElectronAPI {
     getOverview: () => Promise<Result<SpeakerOverview>>
     rebuild: () => Promise<Result<SpeakerOverview>>
     confirmAll: () => Promise<Result<SpeakerOverview>>
+    setSelf: (identityId: string) => Promise<Result<SpeakerIdentity>>
+    prepareReference: (identityId: string) => Promise<Result<{ available: boolean; name?: string; audioBytes?: number }>>
     renameIdentity: (request: { identityId: string; displayName: string }) => Promise<Result<SpeakerIdentity>>
     mergeIdentities: (request: { sourceId: string; targetId: string }) => Promise<Result<SpeakerIdentity>>
     assignAlias: (request: { aliasId: string; identityId: string }) => Promise<Result<SpeakerIdentity>>
@@ -813,6 +816,8 @@ const electronAPI: ElectronAPI = {
     getOverview: () => callIPC('speakers:getOverview'),
     rebuild: () => callIPC('speakers:rebuild'),
     confirmAll: () => callIPC('speakers:confirmAll'),
+    setSelf: (identityId) => callIPC('speakers:setSelf', identityId),
+    prepareReference: (identityId) => callIPC('speakers:prepareReference', identityId),
     renameIdentity: (request) => callIPC('speakers:renameIdentity', request),
     mergeIdentities: (request) => callIPC('speakers:mergeIdentities', request),
     assignAlias: (request) => callIPC('speakers:assignAlias', request)
