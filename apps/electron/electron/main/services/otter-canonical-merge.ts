@@ -12,7 +12,7 @@ import type {
   OtterReconciliationPreview
 } from './otter-reconciliation'
 
-export const OTTER_CANONICAL_MERGE_POLICY = 'accept-proposed-keep-unresolved-separate-v1'
+export const OTTER_CANONICAL_MERGE_POLICY = 'accept-proposed-honor-saved-separate-v2'
 export const OTTER_CANONICAL_MERGE_CONFIRMATION = 'MERGE PROPOSED OTTER MATCHES'
 
 export interface OtterCanonicalMergeInventory {
@@ -104,7 +104,8 @@ export function buildOtterCanonicalMergePlan(
   const globalBlockers: string[] = []
   const seenImports = new Set<string>()
   const seenDevices = new Set<string>()
-  const actions = preview.matches.map((match): OtterCanonicalMergeAction => {
+  const actionableMatches = preview.matches.filter((match) => match.reviewDecision !== 'separate')
+  const actions = actionableMatches.map((match): OtterCanonicalMergeAction => {
     const blockers: string[] = []
     const imported = recordingsById.get(match.importedRecordingId)
     if (!imported) blockers.push('Imported recording no longer exists.')
@@ -155,7 +156,9 @@ export function buildOtterCanonicalMergePlan(
     }
   })
 
-  const unresolvedRecordingIds = preview.unresolved.map((item) => item.importedRecordingId)
+  const unresolvedRecordingIds = preview.unresolved
+    .filter((item) => item.reviewDecision !== 'separate')
+    .map((item) => item.importedRecordingId)
   for (const id of unresolvedRecordingIds) {
     const recording = recordingsById.get(id)
     if (!recording || recording.is_imported !== 1 || recording.source !== 'import') {
@@ -164,6 +167,9 @@ export function buildOtterCanonicalMergePlan(
   }
   const blockers = [...globalBlockers, ...actions.flatMap((action) =>
     action.blockers.map((blocker) => `${action.importedFilename}: ${blocker}`))]
+  if (actions.length === 0 && unresolvedRecordingIds.length === 0) {
+    blockers.push('No new canonical merge work remains; saved keep-separate decisions are already honored.')
+  }
   const fingerprint = fingerprintPlan(actions, unresolvedRecordingIds)
   return {
     generatedAt,

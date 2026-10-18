@@ -10,7 +10,7 @@
  */
 
 import { existsSync, readdirSync, statSync, unlinkSync, utimesSync } from 'fs'
-import { join, basename, extname } from 'path'
+import { join, basename, extname, resolve } from 'path'
 import {
   getDatabase,
   queryAll,
@@ -57,6 +57,11 @@ export interface RepairResult {
   success: boolean
   action: string
   error?: string
+}
+
+function physicalPathKey(value: string): string {
+  const resolved = resolve(value)
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
 }
 
 export function getRecordingSourceDateIssue(
@@ -588,12 +593,25 @@ class IntegrityService {
 
     const files = readdirSync(recordingsPath)
     const audioExtensions = ['.wav', '.mp3', '.m4a', '.ogg', '.webm', '.hda']
+    const trackedPhysicalPaths = new Set([
+      ...queryAll<Pick<Recording, 'file_path'>>(`
+        SELECT file_path FROM recordings WHERE file_path IS NOT NULL AND file_path != ''
+      `),
+      ...queryAll<Pick<SyncedFile, 'file_path'>>(`
+        SELECT file_path FROM synced_files WHERE file_path IS NOT NULL AND file_path != ''
+      `)
+    ].flatMap((item) => item.file_path ? [physicalPathKey(item.file_path)] : []))
 
     for (const file of files) {
       const ext = extname(file).toLowerCase()
       if (!audioExtensions.includes(ext)) continue
 
       const filePath = join(recordingsPath, file)
+
+      // Imported recordings intentionally keep a human-readable/source filename
+      // while file_path points at a collision-safe physical filename. The physical
+      // path is authoritative for disk ownership.
+      if (trackedPhysicalPaths.has(physicalPathKey(filePath))) continue
 
       // Check if it's in synced_files
       const synced = getSyncedFile(file)
@@ -771,12 +789,21 @@ class IntegrityService {
 
     const files = readdirSync(recordingsPath)
     const audioExtensions = ['.wav', '.mp3', '.m4a']
+    const importedPhysicalPaths = new Set(queryAll<Pick<Recording, 'file_path'>>(`
+      SELECT file_path FROM recordings
+      WHERE source = 'import' AND is_imported = 1 AND file_path IS NOT NULL AND file_path != ''
+    `).flatMap((item) => item.file_path ? [physicalPathKey(item.file_path)] : []))
 
     for (const file of files) {
       const ext = extname(file).toLowerCase()
       if (!audioExtensions.includes(ext)) continue
 
       const filePath = join(recordingsPath, file)
+
+      // A source import may be a deliberately preserved short/stub export. It is
+      // not evidence of an interrupted HiDock download and must never be offered
+      // to the destructive automatic download repair path.
+      if (importedPhysicalPaths.has(physicalPathKey(filePath))) continue
 
       try {
         const stats = statSync(filePath)

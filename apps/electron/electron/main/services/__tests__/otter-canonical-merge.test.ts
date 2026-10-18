@@ -171,4 +171,27 @@ describe('Otter canonical merge plan', () => {
 
     expect(second.fingerprint).not.toBe(first.fingerprint)
   })
+
+  it('honors saved keep-separate decisions and blocks a redundant rerun', () => {
+    const reviewedPreview = preview()
+    reviewedPreview.matches.forEach((match) => { match.reviewDecision = 'separate' })
+    reviewedPreview.unresolved.forEach((item) => { item.reviewDecision = 'separate' })
+
+    const plan = buildOtterCanonicalMergePlan(reviewedPreview, recordings, inventory())
+
+    expect(plan.ready).toBe(false)
+    expect(plan.actions).toEqual([])
+    expect(plan.unresolvedRecordingIds).toEqual([])
+    expect(plan.counts).toEqual({
+      proposedAccepted: 0,
+      canonicalizeImported: 0,
+      consolidateExisting: 0,
+      unresolvedKeptSeparate: 0,
+      preDevicePreserved: 1,
+      blockers: 1
+    })
+    expect(plan.blockers).toEqual([
+      'No new canonical merge work remains; saved keep-separate decisions are already honored.'
+    ])
+  })
 })

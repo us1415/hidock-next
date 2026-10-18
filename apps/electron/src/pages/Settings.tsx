@@ -1512,7 +1512,8 @@ export function Settings() {
                             <div>
                               <p className="text-sm font-medium">Canonical merge dry run</p>
                               <p className="text-xs text-muted-foreground">
-                                Accepts every proposed match and keeps every unresolved conversation separate. This
+                                Accepts proposed matches unless you already saved Keep Separate, and classifies any
+                                still-pending unresolved conversation separately. This
                                 check is read-only and cannot apply the merge.
                               </p>
                             </div>
