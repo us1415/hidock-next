@@ -95,7 +95,10 @@ describe('Otter-to-HiDock reconciliation preview', () => {
       adjacentDateDurationMatches: 0,
       provisionalMatches: 2,
       unresolvedOverlapping: 1,
-      deviceWithoutOtterMatch: 1
+      deviceWithoutOtterMatch: 1,
+      reviewedConfirmed: 0,
+      reviewedSeparate: 0,
+      reviewPending: 3
     })
     expect(preview.matches).toEqual(expect.arrayContaining([
       expect.objectContaining({ importedRecordingId: 'exact', method: 'exact-timestamp', confidence: 1 }),
@@ -183,5 +186,52 @@ describe('Otter-to-HiDock reconciliation preview', () => {
       method: 'adjacent-date-duration',
       durationDifferenceSeconds: 0.5
     })
+  })
+
+  it('applies only current, valid review decisions to a regenerated preview', async () => {
+    const recording = imported({
+      id: 'reviewed',
+      filename: 'Reviewed meeting.mp3',
+      date_recorded: '2026-01-05T15:00:00.000Z',
+      source_date_precision: 'exact'
+    })
+    const device = {
+      filename: '2026Jan05-090000-Rec01.hda',
+      size: 1_200_000,
+      duration: 100,
+      dateCreated: '2026-01-05T15:00:00.000Z'
+    }
+
+    const confirmed = await buildOtterReconciliationPreview(
+      [recording],
+      [device],
+      async () => 100,
+      '2026-10-18T18:00:00.000Z',
+      [{
+        importedRecordingId: 'reviewed',
+        deviceFilename: device.filename,
+        decision: 'confirmed',
+        matchMethod: 'exact-timestamp',
+        reviewedAt: '2026-10-18T18:01:00.000Z'
+      }]
+    )
+    const stale = await buildOtterReconciliationPreview(
+      [recording],
+      [device],
+      async () => 100,
+      '2026-10-18T18:00:00.000Z',
+      [{
+        importedRecordingId: 'reviewed',
+        deviceFilename: 'different-device.hda',
+        decision: 'confirmed',
+        matchMethod: 'exact-timestamp',
+        reviewedAt: '2026-10-18T18:01:00.000Z'
+      }]
+    )
+
+    expect(confirmed.matches[0].reviewDecision).toBe('confirmed')
+    expect(confirmed.counts).toMatchObject({ reviewedConfirmed: 1, reviewPending: 0 })
+    expect(stale.matches[0].reviewDecision).toBe('pending')
+    expect(stale.counts).toMatchObject({ reviewedConfirmed: 0, reviewPending: 1 })
   })
 })

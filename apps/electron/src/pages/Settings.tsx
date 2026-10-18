@@ -39,6 +39,9 @@ type OtterImportPreview = NonNullable<
 type OtterReconciliationPreview = NonNullable<
   Awaited<ReturnType<Window['electronAPI']['imports']['previewOtterReconciliation']>>['preview']
 >
+type ReconciliationDecision = OtterReconciliationPreview['matches'][number]['reviewDecision']
+type ReconciliationView = 'matches' | 'unresolved'
+type ReconciliationMethod = 'all' | OtterReconciliationPreview['matches'][number]['method']
 
 export function Settings() {
   // SM-09 fix: Use granular selectors
@@ -68,6 +71,12 @@ export function Settings() {
   const [otterPreview, setOtterPreview] = useState<OtterImportPreview | null>(null)
   const [reconciliationBusy, setReconciliationBusy] = useState(false)
   const [reconciliationPreview, setReconciliationPreview] = useState<OtterReconciliationPreview | null>(null)
+  const [reconciliationDraft, setReconciliationDraft] = useState<Record<string, ReconciliationDecision>>({})
+  const [reconciliationSaved, setReconciliationSaved] = useState<Record<string, ReconciliationDecision>>({})
+  const [reconciliationView, setReconciliationView] = useState<ReconciliationView>('matches')
+  const [reconciliationMethod, setReconciliationMethod] = useState<ReconciliationMethod>('all')
+  const [reconciliationSearch, setReconciliationSearch] = useState('')
+  const [reconciliationPage, setReconciliationPage] = useState(0)
   const [localSearchStatus, setLocalSearchStatus] = useState<'checking' | 'ready' | 'offline'>('checking')
   // C-CHAT: RAG context window — default matches config.ts (10)
   const [ragContextSize, setRagContextSize] = useState<number>(RAG_DEFAULTS.MAX_CONTEXT_CHUNKS)
@@ -376,6 +385,13 @@ export function Settings() {
         return
       }
       setReconciliationPreview(result.preview)
+      const decisions = Object.fromEntries(
+        [...result.preview.matches, ...result.preview.unresolved]
+          .map((item) => [item.importedRecordingId, item.reviewDecision])
+      ) as Record<string, ReconciliationDecision>
+      setReconciliationDraft(decisions)
+      setReconciliationSaved(decisions)
+      setReconciliationPage(0)
       toast.success(
         'Reconciliation preview ready',
         `${result.preview.counts.provisionalMatches} provisional matches found; no recordings were changed.`
@@ -384,6 +400,91 @@ export function Settings() {
       toast.error(
         'Reconciliation preview failed',
         error instanceof Error ? error.message : 'Could not compare Otter and HiDock recordings.'
+      )
+    } finally {
+      setReconciliationBusy(false)
+    }
+  }
+
+  const setReconciliationDecision = (recordingIds: string[], decision: ReconciliationDecision) => {
+    setReconciliationDraft((current) => {
+      const next = { ...current }
+      for (const recordingId of recordingIds) next[recordingId] = decision
+      return next
+    })
+  }
+
+  const reconciliationReviewItems = useMemo(() => {
+    if (!reconciliationPreview) return []
+    const search = reconciliationSearch.trim().toLowerCase()
+    const items = reconciliationView === 'matches'
+      ? reconciliationPreview.matches
+          .filter((item) => reconciliationMethod === 'all' || item.method === reconciliationMethod)
+          .map((item) => ({ kind: 'match' as const, item }))
+      : reconciliationPreview.unresolved.map((item) => ({ kind: 'unresolved' as const, item }))
+    if (!search) return items
+    return items.filter(({ item }) => {
+      const candidate = 'deviceFilename' in item ? item.deviceFilename : ''
+      return `${item.importedFilename} ${candidate}`.toLowerCase().includes(search)
+    })
+  }, [reconciliationMethod, reconciliationPreview, reconciliationSearch, reconciliationView])
+
+  const reconciliationPageSize = 20
+  const reconciliationPageCount = Math.max(1, Math.ceil(reconciliationReviewItems.length / reconciliationPageSize))
+  const reconciliationVisibleItems = reconciliationReviewItems.slice(
+    reconciliationPage * reconciliationPageSize,
+    (reconciliationPage + 1) * reconciliationPageSize
+  )
+  const reconciliationSummary = useMemo(() => {
+    if (!reconciliationPreview) return { confirmed: 0, separate: 0, pending: 0 }
+    const ids = [...reconciliationPreview.matches, ...reconciliationPreview.unresolved]
+      .map((item) => item.importedRecordingId)
+    return ids.reduce((summary, id) => {
+      const decision = reconciliationDraft[id] || 'pending'
+      summary[decision] += 1
+      return summary
+    }, { confirmed: 0, separate: 0, pending: 0 })
+  }, [reconciliationDraft, reconciliationPreview])
+  const reconciliationDirty = useMemo(() => {
+    if (!reconciliationPreview) return false
+    return [...reconciliationPreview.matches, ...reconciliationPreview.unresolved]
+      .some((item) => (reconciliationDraft[item.importedRecordingId] || 'pending') !==
+        (reconciliationSaved[item.importedRecordingId] || 'pending'))
+  }, [reconciliationDraft, reconciliationPreview, reconciliationSaved])
+
+  const handleSaveReconciliationReviews = async () => {
+    if (!reconciliationPreview || !reconciliationDirty) return
+    setReconciliationBusy(true)
+    try {
+      const reviews = [
+        ...reconciliationPreview.matches.map((item) => ({
+          importedRecordingId: item.importedRecordingId,
+          deviceFilename: item.deviceFilename,
+          decision: reconciliationDraft[item.importedRecordingId] || 'pending',
+          matchMethod: item.method
+        })),
+        ...reconciliationPreview.unresolved.map((item) => ({
+          importedRecordingId: item.importedRecordingId,
+          deviceFilename: null,
+          decision: reconciliationDraft[item.importedRecordingId] || 'pending',
+          matchMethod: null
+        }))
+      ]
+      const result = await window.electronAPI.imports.saveOtterReconciliationReviews(reviews)
+      if (!result.success) {
+        toast.error('Review plan not saved', result.error || 'Could not save reconciliation decisions.')
+        return
+      }
+      setReconciliationSaved({ ...reconciliationDraft })
+      toast.success(
+        'Review plan saved',
+        `${reconciliationSummary.confirmed} matches confirmed; ${reconciliationSummary.separate} kept separate. ` +
+        'No recordings or transcripts were changed.'
+      )
+    } catch (error) {
+      toast.error(
+        'Review plan not saved',
+        error instanceof Error ? error.message : 'Could not save reconciliation decisions.'
       )
     } finally {
       setReconciliationBusy(false)
@@ -1146,7 +1247,11 @@ export function Settings() {
                         Preview HiDock Reconciliation
                       </Button>
                       {reconciliationPreview && (
-                        <div className="rounded-md border bg-muted/30 p-3 space-y-2 text-sm" role="status">
+                        <div
+                          className="rounded-md border bg-muted/30 p-3 space-y-3 text-sm"
+                          role="region"
+                          aria-label="Otter reconciliation review"
+                        >
                           <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
                             <span>Saved P1 recordings</span>
                             <span className="font-medium">{reconciliationPreview.counts.deviceRecordings}</span>
@@ -1179,16 +1284,198 @@ export function Settings() {
                             Proposed matches retain the HiDock recording and source timestamp as authoritative. A later
                             confirmed merge will attach Otter transcript metadata to that canonical recording.
                           </p>
-                          {reconciliationPreview.unresolved.length > 0 && (
-                            <div className="space-y-1 text-xs">
-                              <p className="font-medium">First unresolved conversations</p>
-                              {reconciliationPreview.unresolved.slice(0, 5).map((item) => (
-                                <p key={item.importedRecordingId} className="truncate" title={item.importedFilename}>
-                                  {item.recordedDate} · {item.importedFilename}
-                                </p>
-                              ))}
+                          <div className="grid grid-cols-3 gap-2 rounded border bg-background p-2 text-center text-xs">
+                            <div><p className="font-semibold text-green-700 dark:text-green-400">{reconciliationSummary.confirmed}</p><p>Confirmed</p></div>
+                            <div><p className="font-semibold">{reconciliationSummary.separate}</p><p>Keep separate</p></div>
+                            <div><p className="font-semibold text-amber-700 dark:text-amber-400">{reconciliationSummary.pending}</p><p>Pending</p></div>
+                          </div>
+                          <div className="flex flex-wrap gap-2" role="group" aria-label="Reconciliation review category">
+                            <Button
+                              size="sm"
+                              variant={reconciliationView === 'matches' ? 'default' : 'outline'}
+                              onClick={() => { setReconciliationView('matches'); setReconciliationPage(0) }}
+                            >
+                              Proposed matches ({reconciliationPreview.matches.length})
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant={reconciliationView === 'unresolved' ? 'default' : 'outline'}
+                              onClick={() => { setReconciliationView('unresolved'); setReconciliationPage(0) }}
+                            >
+                              Unresolved ({reconciliationPreview.unresolved.length})
+                            </Button>
+                          </div>
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            <Input
+                              value={reconciliationSearch}
+                              onChange={(event) => { setReconciliationSearch(event.target.value); setReconciliationPage(0) }}
+                              placeholder="Search Otter or HiDock filename"
+                              aria-label="Search reconciliation items"
+                            />
+                            {reconciliationView === 'matches' && (
+                              <select
+                                value={reconciliationMethod}
+                                onChange={(event) => {
+                                  setReconciliationMethod(event.target.value as ReconciliationMethod)
+                                  setReconciliationPage(0)
+                                }}
+                                aria-label="Filter reconciliation evidence"
+                                className="rounded-md border border-input bg-background px-3 py-2 text-sm"
+                              >
+                                <option value="all">All evidence</option>
+                                <option value="exact-timestamp">Exact timestamp</option>
+                                <option value="date-duration">Same date + duration</option>
+                                <option value="adjacent-date-duration">Adjacent date + duration</option>
+                              </select>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {reconciliationView === 'matches' ? (
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => setReconciliationDecision(
+                                    reconciliationPreview.matches
+                                      .filter((item) => item.method === 'exact-timestamp')
+                                      .map((item) => item.importedRecordingId),
+                                    'confirmed'
+                                  )}
+                                >
+                                  Confirm all exact timestamp matches
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => setReconciliationDecision(
+                                    reconciliationReviewItems.map(({ item }) => item.importedRecordingId),
+                                    'confirmed'
+                                  )}
+                                  disabled={reconciliationReviewItems.length === 0}
+                                >
+                                  Confirm filtered matches
+                                </Button>
+                              </>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => setReconciliationDecision(
+                                  reconciliationReviewItems.map(({ item }) => item.importedRecordingId),
+                                  'separate'
+                                )}
+                                disabled={reconciliationReviewItems.length === 0}
+                              >
+                                Keep all filtered unresolved items separate
+                              </Button>
+                            )}
+                          </div>
+                          <div className="space-y-2">
+                            {reconciliationVisibleItems.map(({ kind, item }) => {
+                              const decision = reconciliationDraft[item.importedRecordingId] || 'pending'
+                              return (
+                                <div key={item.importedRecordingId} className="rounded border bg-background p-2 text-xs space-y-2">
+                                  <div className="min-w-0">
+                                    <p className="font-medium break-all">{item.importedFilename}</p>
+                                    {kind === 'match' ? (
+                                      <>
+                                        <p className="break-all text-muted-foreground">HiDock: {item.deviceFilename}</p>
+                                        <p className="text-muted-foreground">
+                                          {item.method.replaceAll('-', ' ')} · {Math.round(item.confidence * 100)}% confidence
+                                          {item.durationDifferenceSeconds !== undefined
+                                            ? ` · ${item.durationDifferenceSeconds.toFixed(2)}s duration difference`
+                                            : ''}
+                                        </p>
+                                      </>
+                                    ) : (
+                                      <p className="text-muted-foreground">
+                                        {item.recordedDate} · no high-confidence P1 match
+                                        {item.nearestCandidates[0]?.durationDifferenceSeconds !== null &&
+                                         item.nearestCandidates[0]?.durationDifferenceSeconds !== undefined
+                                          ? ` · nearest duration differs by ${item.nearestCandidates[0].durationDifferenceSeconds.toFixed(1)}s`
+                                          : ''}
+                                      </p>
+                                    )}
+                                  </div>
+                                  <div className="flex flex-wrap gap-2" role="group" aria-label={`Review ${item.importedFilename}`}>
+                                    {kind === 'match' && (
+                                      <Button
+                                        size="sm"
+                                        variant={decision === 'confirmed' ? 'default' : 'outline'}
+                                        onClick={() => setReconciliationDecision([item.importedRecordingId], 'confirmed')}
+                                        aria-pressed={decision === 'confirmed'}
+                                      >
+                                        Confirm match
+                                      </Button>
+                                    )}
+                                    <Button
+                                      size="sm"
+                                      variant={decision === 'separate' ? 'default' : 'outline'}
+                                      onClick={() => setReconciliationDecision([item.importedRecordingId], 'separate')}
+                                      aria-pressed={decision === 'separate'}
+                                    >
+                                      Keep separate
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      variant={decision === 'pending' ? 'secondary' : 'ghost'}
+                                      onClick={() => setReconciliationDecision([item.importedRecordingId], 'pending')}
+                                      aria-pressed={decision === 'pending'}
+                                    >
+                                      Pending
+                                    </Button>
+                                  </div>
+                                </div>
+                              )
+                            })}
+                            {reconciliationVisibleItems.length === 0 && (
+                              <p className="py-4 text-center text-xs text-muted-foreground">No review items match this filter.</p>
+                            )}
+                          </div>
+                          <div className="flex items-center justify-between gap-2 text-xs">
+                            <span>
+                              Page {Math.min(reconciliationPage + 1, reconciliationPageCount)} of {reconciliationPageCount}
+                              {' · '}{reconciliationReviewItems.length} items
+                            </span>
+                            <div className="flex gap-2">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => setReconciliationPage((page) => Math.max(0, page - 1))}
+                                disabled={reconciliationPage === 0}
+                              >
+                                Previous
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => setReconciliationPage((page) => Math.min(reconciliationPageCount - 1, page + 1))}
+                                disabled={reconciliationPage + 1 >= reconciliationPageCount}
+                              >
+                                Next
+                              </Button>
                             </div>
-                          )}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 border-t pt-3">
+                            <Button
+                              onClick={handleSaveReconciliationReviews}
+                              disabled={!reconciliationDirty || reconciliationBusy}
+                            >
+                              <Save className="h-4 w-4 mr-2" />
+                              Save Review Plan
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              onClick={() => setReconciliationDraft({ ...reconciliationSaved })}
+                              disabled={!reconciliationDirty || reconciliationBusy}
+                            >
+                              Discard Unsaved Changes
+                            </Button>
+                            <p className="basis-full text-xs text-muted-foreground">
+                              Saving records review decisions only. It does not merge or modify audio, transcripts,
+                              titles, filenames, source dates, or speaker data.
+                            </p>
+                          </div>
                         </div>
                       )}
                     </div>

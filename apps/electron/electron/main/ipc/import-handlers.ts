@@ -1,13 +1,15 @@
 import { BrowserWindow, dialog, ipcMain } from 'electron'
 import { mkdirSync } from 'fs'
 import { join } from 'path'
-import { getRecordings, getTranscriptsByRecordingIds, queryAll, saveDatabase } from '../services/database'
+import { getRecordings, getTranscriptsByRecordingIds, queryAll, runMany, saveDatabase } from '../services/database'
 import { getRecordingsPath } from '../services/file-storage'
 import { getDataPath } from '../services/config'
 import { createPortableBackup } from '../services/portable-backup'
 import { commitOtterImport, previewOtterImport, type ExistingOtterCandidate } from '../services/otter-import'
 import {
   buildOtterReconciliationPreview,
+  type OtterReconciliationDecision,
+  type OtterReconciliationReview,
   type ReconciliationDeviceFile
 } from '../services/otter-reconciliation'
 import {
@@ -35,13 +37,96 @@ export function registerImportHandlers(): void {
       const deviceFiles = queryAll<ReconciliationDeviceFile>(
         'SELECT filename, size, duration, dateCreated FROM device_file_cache ORDER BY dateCreated'
       )
-      const preview = await buildOtterReconciliationPreview(getRecordings(), deviceFiles)
+      const reviews = queryAll<OtterReconciliationReview>(`
+        SELECT
+          imported_recording_id AS importedRecordingId,
+          device_filename AS deviceFilename,
+          decision,
+          match_method AS matchMethod,
+          reviewed_at AS reviewedAt
+        FROM otter_reconciliation_reviews
+      `)
+      const preview = await buildOtterReconciliationPreview(
+        getRecordings(),
+        deviceFiles,
+        undefined,
+        new Date().toISOString(),
+        reviews
+      )
       return { success: true, preview }
     } catch (error) {
       console.error('imports:preview-otter-reconciliation error:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : 'The Otter-to-HiDock reconciliation preview failed.'
+      }
+    }
+  })
+
+  ipcMain.handle('imports:save-otter-reconciliation-reviews', async (_, value: unknown) => {
+    try {
+      if (!Array.isArray(value) || value.length === 0 || value.length > 1000) {
+        return { success: false, error: 'The reconciliation review selection is invalid.' }
+      }
+      const decisions = new Set<OtterReconciliationDecision>(['pending', 'confirmed', 'separate'])
+      const methods = new Set(['exact-timestamp', 'date-duration', 'adjacent-date-duration'])
+      const seen = new Set<string>()
+      const rows: Array<[string, string | null, OtterReconciliationDecision, string | null, string | null]> = []
+      const importedIds = new Set(
+        getRecordings()
+          .filter((recording) => recording.is_imported === 1 && recording.source === 'import')
+          .map((recording) => recording.id)
+      )
+      const deviceFilenames = new Set(
+        queryAll<{ filename: string }>('SELECT filename FROM device_file_cache').map((item) => item.filename)
+      )
+
+      for (const item of value) {
+        if (!item || typeof item !== 'object') {
+          return { success: false, error: 'A reconciliation review item is invalid.' }
+        }
+        const candidate = item as Record<string, unknown>
+        const importedRecordingId = candidate.importedRecordingId
+        const decision = candidate.decision
+        const deviceFilename = candidate.deviceFilename
+        const matchMethod = candidate.matchMethod
+        if (typeof importedRecordingId !== 'string' || importedRecordingId.length > 200 ||
+            !importedIds.has(importedRecordingId) || seen.has(importedRecordingId) ||
+            typeof decision !== 'string' || !decisions.has(decision as OtterReconciliationDecision)) {
+          return { success: false, error: 'A reconciliation review item is invalid or duplicated.' }
+        }
+        if (decision === 'confirmed' &&
+            (typeof deviceFilename !== 'string' || !deviceFilenames.has(deviceFilename) ||
+             typeof matchMethod !== 'string' || !methods.has(matchMethod))) {
+          return { success: false, error: 'A confirmed reconciliation match is missing valid HiDock evidence.' }
+        }
+        seen.add(importedRecordingId)
+        rows.push([
+          importedRecordingId,
+          decision === 'confirmed' ? deviceFilename as string : null,
+          decision as OtterReconciliationDecision,
+          decision === 'confirmed' ? matchMethod as string : null,
+          decision === 'pending' ? null : new Date().toISOString()
+        ])
+      }
+
+      runMany(`
+        INSERT INTO otter_reconciliation_reviews
+          (imported_recording_id, device_filename, decision, match_method, reviewed_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(imported_recording_id) DO UPDATE SET
+          device_filename = excluded.device_filename,
+          decision = excluded.decision,
+          match_method = excluded.match_method,
+          reviewed_at = excluded.reviewed_at,
+          updated_at = CURRENT_TIMESTAMP
+      `, rows)
+      return { success: true, saved: rows.length }
+    } catch (error) {
+      console.error('imports:save-otter-reconciliation-reviews error:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'The reconciliation review decisions could not be saved.'
       }
     }
   })
