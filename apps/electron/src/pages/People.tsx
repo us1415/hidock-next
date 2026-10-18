@@ -13,7 +13,8 @@ import {
   ChevronRight,
   Filter,
   UserPlus,
-  Trash2
+  Trash2,
+  UserRoundCheck
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -31,6 +32,7 @@ import {
 import type { Person, PersonType } from '@/types/knowledge'
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
+import { SpeakerIdentityManager } from '@/components/SpeakerIdentityManager'
 
 export function People() {
   const navigate = useNavigate()
@@ -49,6 +51,7 @@ export function People() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null)
   const [sortBy, setSortBy] = useState<'name' | 'lastSeen' | 'interactions'>('name')
+  const [showSpeakerLabels, setShowSpeakerLabels] = useState(false)
 
   // Debounce: skip firing on initial mount
   const isFirstMount = useRef(true)
@@ -176,6 +179,10 @@ export function People() {
             <p className="text-sm text-muted-foreground">Everyone mentioned in your knowledge base</p>
           </div>
           <div className="flex items-center gap-2">
+            <Button variant={showSpeakerLabels ? 'default' : 'outline'} size="sm" onClick={() => setShowSpeakerLabels((value) => !value)}>
+              <UserRoundCheck className="h-4 w-4 mr-2" />
+              Speaker Labels
+            </Button>
             <Button variant="outline" size="sm" onClick={() => loadPeople(currentPage)}>
               <RefreshCw className={cn("h-4 w-4 mr-2", loading && "animate-spin")} />
               Refresh
@@ -245,6 +252,7 @@ export function People() {
       {/* Content */}
       <div className="flex-1 overflow-auto p-6">
         <div className="max-w-5xl mx-auto">
+          {showSpeakerLabels && <SpeakerIdentityManager />}
           {/* Result count indicator */}
           {!loading && totalCount > 0 && (
             <p className="text-xs text-muted-foreground mb-4">

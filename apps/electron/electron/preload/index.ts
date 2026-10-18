@@ -89,6 +89,41 @@ interface DeviceReviewItem {
   reviewed_at: string | null
 }
 
+export interface SpeakerAlias {
+  id: string
+  identityId: string | null
+  rawLabel: string
+  normalizedLabel: string
+  occurrenceCount: number
+  firstSeenAt: string | null
+  lastSeenAt: string | null
+}
+
+export interface SpeakerIdentity {
+  id: string
+  displayName: string
+  status: 'needs-review' | 'confirmed'
+  contactId: string | null
+  firstSeenAt: string | null
+  lastSeenAt: string | null
+  occurrenceCount: number
+  aliases: SpeakerAlias[]
+}
+
+export interface SpeakerOverview {
+  identities: SpeakerIdentity[]
+  unresolvedAliases: SpeakerAlias[]
+  counts: {
+    identities: number
+    confirmed: number
+    needsReview: number
+    unresolvedAliases: number
+    rawLabels: number
+    transcriptOccurrences: number
+    speakerSegments: number
+  }
+}
+
 // Type definitions for the API
 export interface ElectronAPI {
   // App
@@ -126,6 +161,14 @@ export interface ElectronAPI {
     update: (request: UpdateContactRequest) => Promise<Result<Contact>>
     delete: (id: string) => Promise<Result<void>>
     getForMeeting: (meetingId: string) => Promise<Result<Contact[]>>
+  }
+
+  speakers: {
+    getOverview: () => Promise<Result<SpeakerOverview>>
+    rebuild: () => Promise<Result<SpeakerOverview>>
+    renameIdentity: (request: { identityId: string; displayName: string }) => Promise<Result<SpeakerIdentity>>
+    mergeIdentities: (request: { sourceId: string; targetId: string }) => Promise<Result<SpeakerIdentity>>
+    assignAlias: (request: { aliasId: string; identityId: string }) => Promise<Result<SpeakerIdentity>>
   }
 
   // Projects
@@ -763,6 +806,14 @@ const electronAPI: ElectronAPI = {
     update: (request) => callIPC('contacts:update', request),
     delete: (id) => callIPC('contacts:delete', id),
     getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId)
+  },
+
+  speakers: {
+    getOverview: () => callIPC('speakers:getOverview'),
+    rebuild: () => callIPC('speakers:rebuild'),
+    renameIdentity: (request) => callIPC('speakers:renameIdentity', request),
+    mergeIdentities: (request) => callIPC('speakers:mergeIdentities', request),
+    assignAlias: (request) => callIPC('speakers:assignAlias', request)
   },
 
   projects: {

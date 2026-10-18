@@ -26,8 +26,8 @@ Replace the manual P1 workflow—work computer to phone to Otter—with a reliab
 
 ## Current count
 
-- Discovered: 36
-- Fixed and verified: 34
+- Discovered: 37
+- Fixed and verified: 35
 - Fixed, device verification pending: 1
 - Open: 1
 
@@ -71,6 +71,7 @@ Replace the manual P1 workflow—work computer to phone to Otter—with a reliab
 | TR-034 | Fixed and verified | A naive canonical merge would have collided with six existing local HiDock rows that use the same device basename with a `.wav` extension, risking duplicate Library items or lost Otter metadata. | The canonical planner now compares extension-independent device identities. It consolidates those six pairs into the existing HiDock rows, transfers their Otter transcript/history metadata, archives the redundant imported audio, and blocks execution if either side has conflicting transcript, capture, or quality data. A disposable-database transaction test verifies the full path. |
 | TR-035 | Fixed and verified | After the canonical merge, two previously unresolved records gained new duration-based proposals, so a rerun could ignore their saved Keep Separate decisions and attempt to merge them into targets that already had transcripts. | Canonical planning now excludes every proposed or unresolved item with a durable Keep Separate decision and refuses an empty rerun. A regression test covers this post-merge state. |
 | TR-036 | Fixed and verified | The integrity scanner compared disk basenames only, so collision-safe Otter audio paths looked orphaned after their Library display/device filenames diverged; the known 45-byte imported stub was also misclassified as an interrupted download eligible for deletion. | Disk ownership now uses the authoritative normalized `file_path` from recordings and synced files. Preserved source imports are excluded from destructive incomplete-download repair suggestions. A regression test covers both failures against one collision-safe stub import. |
+| TR-037 | Fixed and verified | A first-pass speaker correction design could have assigned the global label “Speaker 1” to one person even though that label represents different people in different recordings. | Generic labels remain explicitly unresolved and the service rejects global assignment. The People interface explains that they require per-recording recognition/review. An integration regression proves the guard while named-label corrections and merges remain durable. |
 
 ## Delivery roadmap
 
@@ -157,8 +158,8 @@ date controls chronology:
 ### Milestone 5 — Speaker recognition
 
 - [x] Inventory speaker labels from the saved Otter export without importing data; the complete archive contains 130 distinct raw labels for normalization.
-- [ ] Normalize speakers from imported Otter transcripts into reusable identities.
-- [ ] Add an interface to correct and merge speaker identities.
+- [x] Normalize speakers from imported Otter transcripts into reusable identities while preserving every original label as evidence. The live index contains 111 named candidate identities from 130 raw labels.
+- [x] Add an interface to correct and merge named speaker identities. Generic labels remain unresolved because their meaning is recording-specific (TR-037).
 - [ ] Use confirmed historical labels as evidence for future speaker suggestions.
 - [ ] Keep confidence scores and require confirmation before permanently assigning uncertain speakers.
 
@@ -210,3 +211,4 @@ date controls chronology:
 - Reconciliation review workspace: schema v25, persisted review decisions, stale-pair protection, searchable/paginated evidence review, safe bulk classification, and an explicit no-merge UI are covered by 23 focused migration/service/Settings tests. The full gate passes 1,499 tests across 96 files, project-wide node-and-web typecheck and the production build pass, the live database migrated cleanly with zero integrity issues, and the live visual check confirmed the 379 proposed/22 unresolved/401 pending review state without changing a recording.
 - Canonical merge dry run: schema v26 adds batch/audit records; the planner uses a SHA-256 fingerprint and blocks stale or conflicting execution. Focused planner, migration, reconciliation, and Settings coverage passes 27 tests; a separate disposable-database integration test proves in-place canonicalization, existing-row consolidation, transcript transfer, unresolved preservation, redundant-audio archival, and audit creation. The project-wide node-and-web typecheck and production build pass. The full Electron gate passed 1,503 of 1,504 tests; its only miss was the known load-sensitive jsdom view-switch budget at 208 ms versus 200 ms, and that complete six-test performance file passed alone with a 121 ms view switch. The live read-only plan is ready with 379 accepted mappings (373 in place and 6 existing-row consolidations), 22 kept separate, 240 pre-device records preserved, and 0 blockers. Live data has not been merged.
 - Canonical merge applied and audited: batch `80854198-39db-45a8-8f17-5e3b0c89a031` used fingerprint `eec74c78476ee08f67b24c2b317cbd38b98b22b64955c928d7a8315cb26c78a9` after creating `HiDock/merge-safety/hidock-next-backup-20261018T192847Z`. Its 652-file, 3,738,004,725-byte manifest passed a complete size and SHA-256 validation. The live database contains 401 applied audit rows: 379 canonicalized and 22 kept separate. All 379 canonical rows exist, retain transcript rows, and match the device timestamp stored in their after-snapshot; 0 chronology mismatches were found. Six redundant imported audio files exist in the batch reconciliation archive, their source rows are gone, and their canonical targets remain. Total Library rows changed from 651 to 645 exactly as expected; 262 imports remain (240 pre-device plus 22 kept separate). Post-merge verification exposed and fixed saved-decision rerun protection (TR-035) and collision-safe physical-path integrity handling (TR-036); the restarted app then reported 0 pending canonical actions and 0 integrity issues.
+- Speaker identity foundation: schema v27 preserves raw transcript labels separately from reusable identities and occurrence evidence. The live rebuild indexed all 130 Otter labels across 3,251 transcript/label occurrences into 111 named candidates plus 19 unresolved generic labels; it does not alter transcript text or chronology. The People page now supports confirmation/rename and explicit duplicate merges. Generic labels cannot be globally assigned (TR-037). The disposable-database integration test, project-wide typecheck, and production Electron build pass.

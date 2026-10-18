@@ -7,7 +7,7 @@ import { buildRecordingMeetingWindow } from './meeting-correlation'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 26
+const SCHEMA_VERSION = 27
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -257,6 +257,50 @@ CREATE TABLE IF NOT EXISTS transcripts (
     question_suggestions TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (recording_id) REFERENCES recordings(id)
+);
+
+-- Reusable speaker identities and raw transcript-label evidence (v27)
+CREATE TABLE IF NOT EXISTS speaker_identities (
+    id TEXT PRIMARY KEY,
+    canonical_key TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    contact_id TEXT,
+    status TEXT NOT NULL DEFAULT 'needs-review'
+      CHECK(status IN ('needs-review', 'confirmed')),
+    first_seen_at TEXT,
+    last_seen_at TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS speaker_aliases (
+    id TEXT PRIMARY KEY,
+    identity_id TEXT,
+    raw_label TEXT NOT NULL,
+    normalized_label TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'transcript',
+    occurrence_count INTEGER NOT NULL DEFAULT 0,
+    first_seen_at TEXT,
+    last_seen_at TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(raw_label, source),
+    FOREIGN KEY (identity_id) REFERENCES speaker_identities(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS speaker_occurrences (
+    id TEXT PRIMARY KEY,
+    transcript_id TEXT NOT NULL,
+    recording_id TEXT NOT NULL,
+    alias_id TEXT NOT NULL,
+    segment_count INTEGER NOT NULL DEFAULT 0,
+    recorded_at TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(transcript_id, alias_id),
+    FOREIGN KEY (transcript_id) REFERENCES transcripts(id) ON DELETE CASCADE,
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+    FOREIGN KEY (alias_id) REFERENCES speaker_aliases(id) ON DELETE CASCADE
 );
 
 -- Embeddings for RAG
@@ -1422,6 +1466,59 @@ const MIGRATIONS: Record<number, () => void> = {
       'CREATE INDEX IF NOT EXISTS idx_otter_merge_audit_batch ' +
       'ON otter_reconciliation_merge_audit(batch_id, status)'
     )
+  },
+  27: () => {
+    console.log('Running migration to schema v27: Adding reusable speaker identities')
+    const database = getDatabase()
+    database.run(`
+      CREATE TABLE IF NOT EXISTS speaker_identities (
+        id TEXT PRIMARY KEY,
+        canonical_key TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        contact_id TEXT,
+        status TEXT NOT NULL DEFAULT 'needs-review'
+          CHECK(status IN ('needs-review', 'confirmed')),
+        first_seen_at TEXT,
+        last_seen_at TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+      )
+    `)
+    database.run(`
+      CREATE TABLE IF NOT EXISTS speaker_aliases (
+        id TEXT PRIMARY KEY,
+        identity_id TEXT,
+        raw_label TEXT NOT NULL,
+        normalized_label TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'transcript',
+        occurrence_count INTEGER NOT NULL DEFAULT 0,
+        first_seen_at TEXT,
+        last_seen_at TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(raw_label, source),
+        FOREIGN KEY (identity_id) REFERENCES speaker_identities(id) ON DELETE SET NULL
+      )
+    `)
+    database.run(`
+      CREATE TABLE IF NOT EXISTS speaker_occurrences (
+        id TEXT PRIMARY KEY,
+        transcript_id TEXT NOT NULL,
+        recording_id TEXT NOT NULL,
+        alias_id TEXT NOT NULL,
+        segment_count INTEGER NOT NULL DEFAULT 0,
+        recorded_at TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(transcript_id, alias_id),
+        FOREIGN KEY (transcript_id) REFERENCES transcripts(id) ON DELETE CASCADE,
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+        FOREIGN KEY (alias_id) REFERENCES speaker_aliases(id) ON DELETE CASCADE
+      )
+    `)
+    database.run('CREATE INDEX IF NOT EXISTS idx_speaker_alias_identity ON speaker_aliases(identity_id)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_speaker_occurrence_recording ON speaker_occurrences(recording_id)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_speaker_occurrence_alias ON speaker_occurrences(alias_id)')
   }
 
 }
