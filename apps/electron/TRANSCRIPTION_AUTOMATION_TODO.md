@@ -28,6 +28,8 @@ Current live state at the stopping point:
 - All eight priority identities have a valid locally extracted historical reference sample.
 - OpenAI `gpt-4o-transcribe-diarize` is configured, while automatic transcription remains off.
 - No paid diarized transcription has yet been used to validate the new identity-reference path end to end.
+- TR-038 is open: the PDF visual-QA artifact combined real recording metadata with synthetic names, summary, transcript,
+  and word count without a visible SAMPLE label. It must not be treated as transcript evidence.
 
 Start the next session by:
 
@@ -53,10 +55,10 @@ an application-owned evidence score, clearly distinguished from provider output.
 
 ## Current count
 
-- Discovered: 37
+- Discovered: 38
 - Fixed and verified: 35
 - Fixed, device verification pending: 1
-- Open: 1
+- Open: 2
 
 ## Bugs
 
@@ -99,6 +101,7 @@ an application-owned evidence score, clearly distinguished from provider output.
 | TR-035 | Fixed and verified | After the canonical merge, two previously unresolved records gained new duration-based proposals, so a rerun could ignore their saved Keep Separate decisions and attempt to merge them into targets that already had transcripts. | Canonical planning now excludes every proposed or unresolved item with a durable Keep Separate decision and refuses an empty rerun. A regression test covers this post-merge state. |
 | TR-036 | Fixed and verified | The integrity scanner compared disk basenames only, so collision-safe Otter audio paths looked orphaned after their Library display/device filenames diverged; the known 45-byte imported stub was also misclassified as an interrupted download eligible for deletion. | Disk ownership now uses the authoritative normalized `file_path` from recordings and synced files. Preserved source imports are excluded from destructive incomplete-download repair suggestions. A regression test covers both failures against one collision-safe stub import. |
 | TR-037 | Fixed and verified | A first-pass speaker correction design could have assigned the global label “Speaker 1” to one person even though that label represents different people in different recordings. | Generic labels remain explicitly unresolved and the service rejects global assignment. The People interface explains that they require per-recording recognition/review. An integration regression proves the guard while named-label corrections and merges remain durable. |
+| TR-038 | Open | The PDF visual-QA artifact used a real recording title, filename, and timestamp with synthetic speaker names, summary, transcript text, and word count, but displayed no SAMPLE/test-data warning. | Treat the existing preview as layout-only and never as transcript evidence. Replace it with unmistakably synthetic metadata or a visible SAMPLE watermark, and separately verify a real app export against the stored transcript before claiming transcript-export fidelity. |
 
 ## Delivery roadmap
 
